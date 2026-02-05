@@ -1,11 +1,12 @@
 import { ThemedText } from '@/components/themed-text';
 import { Ionicons } from '@expo/vector-icons';
-import React, { useState } from 'react';
-import { StyleSheet, TouchableOpacity, View } from 'react-native';
+import React, { useRef, useState } from 'react';
+import { Modal, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { Calendar } from './Calendar';
 
 interface TimeSlot {
   time: string;
-  status: 'available' | 'booked';
+  status: 'available' | 'booked' | 'past';
 }
 
 interface Sport {
@@ -22,6 +23,7 @@ interface SlotAvailabilityProps {
   selectedDate: Date;
   onNewPress?: () => void;
   onSlotPress?: (sport: Sport, slot: TimeSlot) => void;
+  onDateChange?: (date: Date) => void;
 }
 
 export function SlotAvailability({
@@ -29,8 +31,24 @@ export function SlotAvailability({
   selectedDate,
   onNewPress,
   onSlotPress,
+  onDateChange,
 }: SlotAvailabilityProps) {
   const [selectedSport, setSelectedSport] = useState<string>('all');
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [showCalendar, setShowCalendar] = useState(false);
+  const dropdownRef = useRef<any>(null);
+  const [dropdownPos, setDropdownPos] = useState({ x: 0, y: 0, width: 160, height: 40 });
+
+  const openDropdown = () => {
+    if (dropdownRef.current && dropdownRef.current.measureInWindow) {
+      dropdownRef.current.measureInWindow((x: number, y: number, width: number, height: number) => {
+        setDropdownPos({ x, y, width: Math.max(width, 160), height });
+        setShowDropdown(true);
+      });
+    } else {
+      setShowDropdown(true);
+    }
+  };
 
   const formatDate = (date: Date) => {
     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -51,24 +69,22 @@ export function SlotAvailability({
       <View style={styles.header}>
         <View>
           <ThemedText style={styles.title} lightColor="#111827">
-            Slot{'\n'}Availability
+            Slot{' '}Availability
           </ThemedText>
-          <ThemedText style={styles.subtitle} lightColor="#6B7280">
-            Showing{'\n'}status for{'\n'}{formatDate(selectedDate)}
-          </ThemedText>
+          <TouchableOpacity onPress={() => setShowCalendar(true)} style={styles.dateTouch}>
+            <Ionicons name="calendar-outline" size={16} color="#16A34A" />
+            <ThemedText style={styles.dateText} lightColor="#16A34A">
+              {formatDate(selectedDate)}
+            </ThemedText>
+          </TouchableOpacity>
         </View>
         
         <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.dropdown}>
+          <TouchableOpacity ref={dropdownRef} style={styles.dropdown} onPress={openDropdown}>
             <ThemedText style={styles.dropdownText} lightColor="#374151">
-              All Sports
+              {selectedSport === 'all' ? 'All Sports' : (sports.find(s => s.id === selectedSport)?.name ?? 'All Sports')}
             </ThemedText>
             <Ionicons name="chevron-down" size={16} color="#374151" />
-          </TouchableOpacity>
-          
-          <TouchableOpacity style={styles.newButton} onPress={onNewPress}>
-            <Ionicons name="add" size={20} color="#fff" />
-            <ThemedText style={styles.newButtonText}>New</ThemedText>
           </TouchableOpacity>
         </View>
       </View>
@@ -99,30 +115,17 @@ export function SlotAvailability({
           </View>
 
           <View style={styles.slotsGrid}>
-            {sport.slots.map((slot, index) => (
+            {sport.slots.filter(s => s.status === 'available').map((slot, index) => (
               <TouchableOpacity
                 key={index}
-                style={[
-                  styles.slotButton,
-                  slot.status === 'available' ? styles.availableSlot : styles.bookedSlot,
-                ]}
+                style={[styles.slotButton, styles.availableSlot]}
                 onPress={() => onSlotPress?.(sport, slot)}
               >
-                <ThemedText
-                  style={[
-                    styles.slotTime,
-                    slot.status === 'available' ? styles.availableSlotText : styles.bookedSlotText,
-                  ]}
-                >
+                <ThemedText style={[styles.slotTime, styles.availableSlotText]}>
                   {slot.time}
                 </ThemedText>
-                <ThemedText
-                  style={[
-                    styles.slotStatus,
-                    slot.status === 'available' ? styles.availableSlotText : styles.bookedSlotText,
-                  ]}
-                >
-                  {slot.status === 'available' ? 'Available' : 'Booked'}
+                <ThemedText style={[styles.slotStatus, styles.availableSlotText]}>
+                  Book Now
                 </ThemedText>
               </TouchableOpacity>
             ))}
@@ -130,20 +133,29 @@ export function SlotAvailability({
         </View>
       ))}
 
-      <View style={styles.legend}>
-        <View style={styles.legendItem}>
-          <View style={[styles.legendDot, styles.availableLegend]} />
-          <ThemedText style={styles.legendText} lightColor="#0EA5E9">
-            Available
-          </ThemedText>
-        </View>
-        <View style={styles.legendItem}>
-          <View style={[styles.legendDot, styles.bookedLegend]} />
-          <ThemedText style={styles.legendText} lightColor="#6B7280">
-            Booked
-          </ThemedText>
-        </View>
-      </View>
+      <Modal visible={showDropdown} transparent animationType="fade" onRequestClose={() => setShowDropdown(false)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowDropdown(false)}>
+          <View style={[styles.dropdownMenu, { top: dropdownPos.y + dropdownPos.height + 6, left: dropdownPos.x, width: dropdownPos.width }]}>
+            <TouchableOpacity style={[styles.dropdownItem, selectedSport === 'all' && styles.dropdownItemActive]} onPress={() => { setSelectedSport('all'); setShowDropdown(false); }}>
+              <ThemedText style={[styles.dropdownItemText, selectedSport === 'all' && styles.dropdownItemTextActive]}>All Sports</ThemedText>
+            </TouchableOpacity>
+            {sports.map((s) => (
+              <TouchableOpacity key={s.id} style={[styles.dropdownItem, selectedSport === s.id && styles.dropdownItemActive]} onPress={() => { setSelectedSport(s.id); setShowDropdown(false); }}>
+                <ThemedText style={[styles.dropdownItemText, selectedSport === s.id && styles.dropdownItemTextActive]}>{s.name}</ThemedText>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Calendar Modal for date selection */}
+      <Modal visible={showCalendar} transparent animationType="fade" onRequestClose={() => setShowCalendar(false)}>
+        <TouchableOpacity style={styles.calendarOverlay} activeOpacity={1} onPress={() => setShowCalendar(false)}>
+          <View style={styles.calendarBox}>
+            <Calendar selectedDate={selectedDate} onDateSelect={(d) => { onDateChange?.(d); setShowCalendar(false); }} />
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
@@ -164,9 +176,21 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
   },
-  subtitle: {
-    fontSize: 12,
-    marginTop: 4,
+  dateTouch: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    backgroundColor: '#ECFDF5',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#D1FAE5',
+  },
+  dateText: {
+    fontSize: 14,
+    fontWeight: '600',
   },
   headerRight: {
     flexDirection: 'row',
@@ -188,20 +212,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
   },
-  newButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#16A34A',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
-    gap: 4,
-  },
-  newButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  
   sportCard: {
     backgroundColor: '#fff',
     borderRadius: 12,
@@ -252,11 +263,11 @@ const styles = StyleSheet.create({
   slotsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 10,
-    justifyContent: 'space-between',
+    gap: 8,
+    justifyContent: 'flex-start',
   },
   slotButton: {
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     paddingVertical: 10,
     borderRadius: 8,
     alignItems: 'center',
@@ -320,4 +331,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
   },
+  modalOverlay: { flex: 1, backgroundColor: 'transparent' },
+  dropdownMenu: { position: 'absolute', top: 120, right: 16, width: 160, backgroundColor: '#fff', borderRadius: 6, borderWidth: 1, borderColor: '#D1D5DB', overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.08, shadowRadius: 12, elevation: 8 },
+  dropdownItem: { paddingVertical: 10, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: '#F3F4F6', backgroundColor: '#fff' },
+  dropdownItemText: { fontSize: 14, color: '#111827' },
+  dropdownItemActive: { backgroundColor: '#2563EB' },
+  dropdownItemTextActive: { color: '#fff' },
+  calendarOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'center', alignItems: 'center' },
+  calendarBox: { backgroundColor: '#fff', borderRadius: 12, overflow: 'hidden', width: '90%', maxWidth: 360 },
 });

@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Modal, Animated, Dimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import React, { useEffect, useRef, useState } from 'react';
+import { Animated, Dimensions, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface SideMenuProps {
   visible: boolean;
@@ -44,7 +44,7 @@ export default function SideMenu({ visible, onClose }: SideMenuProps) {
         <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={onClose} />
         <Animated.View style={[styles.container, { transform: [{ translateX }] }] }>
           <View style={styles.logoSection}>
-            <Text style={styles.logoText}>IndoorB</Text>
+            <Text style={styles.logoText}>SPORTYNIX</Text>
           </View>
 
           <Text style={styles.sectionTitle}>ADMIN</Text>
@@ -87,7 +87,7 @@ export default function SideMenu({ visible, onClose }: SideMenuProps) {
             <Text style={styles.itemText}>Help</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.item} onPress={() => { /* implement logout */ }}>
+          <TouchableOpacity style={styles.item} onPress={() => { onClose(); router.replace('/login'); }}>
             <Ionicons name="log-out" size={18} color="#333" />
             <Text style={styles.itemText}>Logout</Text>
           </TouchableOpacity>

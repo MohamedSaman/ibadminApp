@@ -1,7 +1,7 @@
-import React from 'react';
-import { SafeAreaView, View, Text, StyleSheet, ScrollView, TouchableOpacity, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import React from 'react';
+import { Image, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 const reviews = [
   {
@@ -47,7 +47,10 @@ export default function FeedbackScreen() {
           </View>
           <View style={styles.divider} />
           <View style={styles.summaryItem}>
-            <Text style={styles.summaryValue}>5.0 <Text style={styles.stars}>★★★★★</Text></Text>
+            <View style={styles.ratingRow}>
+              <Text style={styles.summaryValue}>5.0</Text>
+              <Text style={[styles.stars, styles.starsSpacing]}>★★★★★</Text>
+            </View>
             <Text style={styles.summaryLabel}>Average Rating</Text>
           </View>
           <View style={styles.divider} />
@@ -133,6 +136,8 @@ const styles = StyleSheet.create({
   summaryLabel: { color: '#6B7280', marginTop: 4, fontSize: 12 },
   divider: { height: 1, width: '100%', backgroundColor: '#E6E6E6', marginVertical: 8 },
   stars: { color: '#F59E0B' },
+  ratingRow: { flexDirection: 'row', alignItems: 'center' },
+  starsSpacing: { marginLeft: 10 },
   reviewCard: {
     backgroundColor: '#fff',
     borderRadius: 8,

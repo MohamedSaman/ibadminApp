@@ -1,14 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
-import { StyleSheet, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface HeaderProps {
   onMenuPress?: () => void;
   onNotificationPress?: () => void;
   onProfilePress?: () => void;
+  notificationCount?: number;
 }
 
-export function Header({ onMenuPress, onNotificationPress, onProfilePress }: HeaderProps) {
+export function Header({ onMenuPress, onNotificationPress, onProfilePress, notificationCount = 0 }: HeaderProps) {
   return (
     <View style={styles.container}>
       <TouchableOpacity style={styles.menuButton} onPress={onMenuPress}>
@@ -18,6 +19,13 @@ export function Header({ onMenuPress, onNotificationPress, onProfilePress }: Hea
       <View style={styles.rightSection}>
         <TouchableOpacity style={styles.notificationButton} onPress={onNotificationPress}>
           <Ionicons name="notifications-outline" size={24} color="#333" />
+          {notificationCount > 0 && (
+            <View style={styles.notificationBadge}>
+              <Text style={styles.notificationBadgeText}>
+                {notificationCount > 99 ? '99+' : notificationCount}
+              </Text>
+            </View>
+          )}
         </TouchableOpacity>
         
         <TouchableOpacity style={styles.profileButton} onPress={onProfilePress}>
@@ -60,6 +68,24 @@ const styles = StyleSheet.create({
   },
   notificationButton: {
     padding: 8,
+    position: 'relative',
+  },
+  notificationBadge: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    backgroundColor: '#EF4444',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  notificationBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
   },
   profileButton: {
     flexDirection: 'row',
