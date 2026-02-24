@@ -1,8 +1,12 @@
 import SideMenu from '@/components/SideMenu';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
-import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View, Image } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { getProfile, updateProfile, changePassword, getVenue, updateVenue, getStaffMembers, createStaffMember, deleteStaffMember, updateStaffMember } from '@/services/indoorAdminApi';
+import { User, Venue, StaffMember as StaffMemberType, VenueUpdatePayload } from '@/types/api';
 
 const menuItems = [
   { id: 'profile', label: 'My Profile', icon: 'person' },
@@ -16,6 +20,426 @@ export default function SettingsScreen() {
   const router = useRouter();
   const [activeSection, setActiveSection] = useState('profile');
   const [menuOpen, setMenuOpen] = useState(false);
+
+  // API data state
+  const [profile, setProfile] = useState<User | null>(null);
+  const [venue, setVenue] = useState<Venue | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // Fetch profile and venue data
+  const fetchData = useCallback(async (showRefresh = false) => {
+    try {
+      if (showRefresh) setRefreshing(true);
+      else setLoading(true);
+
+      const [profileData, venueData] = await Promise.all([
+        getProfile().catch(() => null),
+        getVenue().catch(() => null),
+      ]);
+
+      if (profileData) {
+        setProfile(profileData);
+        // Update form fields with profile data
+        setEmail(profileData.email || '');
+        setContactNumber(profileData.phone || '');
+      }
+
+      if (venueData) {
+        setVenue(venueData);
+        // Update form fields with venue data
+        setComplexName(venueData.name || '');
+        setFullAddress(venueData.address || '');
+        setPostalCode(venueData.postal_code || '');
+        setCounty(venueData.county || '');
+        setWebsite(venueData.website || '');
+        setDescription(venueData.description || '');
+        // Venue-specific fields from signup
+        setLocation(venueData.location || '');
+        setComplexType(venueData.complex_type || 'Indoor');
+        setComplexStatus(venueData.status || 'Active');
+        // Venue contact info - separate from admin profile
+        if (venueData.email_address) setEmail(venueData.email_address);
+        if (venueData.contact_number) setContactNumber(venueData.contact_number);
+
+        // Load cover image and gallery images from backend
+        if (venueData.cover_image) {
+          setCoverImageUri(venueData.cover_image);
+        }
+        if (venueData.gallery_images_json && Array.isArray(venueData.gallery_images_json)) {
+          setGalleryImageUris(venueData.gallery_images_json);
+        }
+        if (venueData.video_tour_url) setVideoTourUrl(venueData.video_tour_url);
+        if (venueData.description) setDescription(venueData.description);
+        if (venueData.terms) setTermsConditions(venueData.terms);
+
+        // Parse opening hours from backend format to display format
+        if (venueData.opening_hours && typeof venueData.opening_hours === 'object') {
+          const dayNames = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+          const dayLabels = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+          
+          const convert24To12 = (time24: string): string => {
+            if (!time24) return '6 AM';
+            const [hours] = time24.split(':').map(Number);
+            const period = hours >= 12 ? 'PM' : 'AM';
+            const hour12 = hours % 12 || 12;
+            return `${hour12} ${period}`;
+          };
+
+          const parsedHours = dayNames.map((dayName, idx) => {
+            const config = venueData.opening_hours[dayName];
+            if (!config) return { day: dayLabels[idx], time: '6 AM - 9 PM' }; // Default
+            if (config.closed) return { day: dayLabels[idx], time: 'Closed' };
+            const open = convert24To12(config.open);
+            const close = convert24To12(config.close);
+            return { day: dayLabels[idx], time: `${open} - ${close}` };
+          });
+          
+          console.log('[Settings] Loaded opening_hours from backend:', JSON.stringify(venueData.opening_hours, null, 2));
+          console.log('[Settings] Parsed for display:', parsedHours);
+          setOpeningHours(parsedHours);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch settings data:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  // Fetch staff members from backend
+  const fetchStaff = useCallback(async () => {
+    try {
+      setStaffLoading(true);
+      const data = await getStaffMembers();
+      setStaffData(data);
+    } catch (err) {
+      console.error('Failed to fetch staff:', err);
+    } finally {
+      setStaffLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchStaff();
+  }, [fetchStaff]);
+
+  // Reset pagination when search or filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [staffSearch, roleFilter, shiftFilter]);
+
+  // Pick staff photo
+  const pickStaffPhoto = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Denied', 'Please allow access to your photo library to upload staff photos.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      const uri = asset.uri;
+      const name = uri.split('/').pop() || 'staff.jpg';
+      const ext = name.split('.').pop()?.toLowerCase() || 'jpg';
+      const type = ext === 'png' ? 'image/png' : 'image/jpeg';
+      setNewStaffPhotoUri(uri);
+      setNewStaffPhotoFile({ uri, name, type });
+    }
+  };
+
+  // Pick cover image from gallery
+  const pickCoverImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Denied', 'Please allow access to your photo library to upload images.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [16, 9],
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      const uri = asset.uri;
+      const name = uri.split('/').pop() || 'cover.jpg';
+      const ext = name.split('.').pop()?.toLowerCase() || 'jpg';
+      const type = ext === 'png' ? 'image/png' : 'image/jpeg';
+      setCoverImageUri(uri);
+      setCoverImageFile({ uri, name, type });
+    }
+  };
+
+  // Pick gallery images (multiple)
+  const pickGalleryImages = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Denied', 'Please allow access to your photo library to upload images.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsMultipleSelection: true,
+      selectionLimit: 4,
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets.length > 0) {
+      const newUris: string[] = [];
+      const newFiles: { uri: string; name: string; type: string }[] = [];
+      result.assets.forEach((asset) => {
+        const uri = asset.uri;
+        const name = uri.split('/').pop() || 'gallery.jpg';
+        const ext = name.split('.').pop()?.toLowerCase() || 'jpg';
+        const type = ext === 'png' ? 'image/png' : 'image/jpeg';
+        newUris.push(uri);
+        newFiles.push({ uri, name, type });
+      });
+      setGalleryImageUris((prev) => [...prev, ...newUris]);
+      setGalleryImageFiles((prev) => [...prev, ...newFiles]);
+    }
+  };
+
+  // Remove a gallery image (local, before upload)
+  const removeGalleryImage = (index: number) => {
+    setGalleryImageUris((prev) => prev.filter((_, i) => i !== index));
+    setGalleryImageFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // Enter edit mode for staff
+  const enterEditMode = (staff: StaffMemberType) => {
+    setEditedStaffName(staff.name);
+    setEditedStaffRole(staff.role);
+    setEditedStaffShift(staff.shift);
+    setEditedStaffPhone(staff.phone || '');
+    setEditedStaffStatus(staff.status);
+    setEditedStaffStatusDetail(staff.status_detail || '');
+    setEditedStaffPhotoUri(staff.photo || null);
+    setEditedStaffPhotoFile(null);
+    setIsEditingStaff(true);
+  };
+
+  // Pick edited staff photo
+  const pickEditStaffPhoto = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Denied', 'Please allow access to your photo library to upload staff photos.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      const uri = asset.uri;
+      const name = uri.split('/').pop() || 'staff.jpg';
+      const ext = name.split('.').pop()?.toLowerCase() || 'jpg';
+      const type = ext === 'png' ? 'image/png' : 'image/jpeg';
+      setEditedStaffPhotoUri(uri);
+      setEditedStaffPhotoFile({ uri, name, type });
+    }
+  };
+
+  // Save edited staff
+  const saveEditedStaff = async () => {
+    if (!selectedStaff || !editedStaffName.trim() || !editedStaffRole || !editedStaffShift) {
+      Alert.alert('Error', 'Please fill in all required fields');
+      return;
+    }
+
+    try {
+      setSaving(true);
+      const updateData: any = {
+        name: editedStaffName,
+        role: editedStaffRole,
+        shift: editedStaffShift,
+        phone: editedStaffPhone,
+        status: editedStaffStatus,
+        status_detail: editedStaffStatusDetail,
+      };
+
+      // Add photo if a new one was selected
+      if (editedStaffPhotoFile) {
+        updateData.photo = editedStaffPhotoFile;
+      }
+
+      await updateStaffMember(selectedStaff.id, updateData);
+      Alert.alert('Success', 'Staff member updated successfully!');
+      setIsEditingStaff(false);
+      setStaffDetailModalVisible(false);
+      fetchStaff();
+    } catch (err: any) {
+      console.error('Staff update error:', err);
+      Alert.alert('Error', err?.response?.data?.detail || 'Failed to update staff member');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Refresh data when settings screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      console.log('[Settings] Screen focused, refreshing opening hours...');
+      // Fetch only venue data to get latest opening hours
+      (async () => {
+        try {
+          const venueData = await getVenue().catch(() => null);
+          if (venueData) {
+            console.log('[Settings] Refreshed opening_hours:', JSON.stringify(venueData.opening_hours, null, 2));
+            setVenue(venueData);
+            
+            // Update opening hours display
+            if (venueData.opening_hours && typeof venueData.opening_hours === 'object') {
+              const dayNames = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+              const dayLabels = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+              
+              const convert24To12 = (time24: string): string => {
+                if (!time24) return '6 AM';
+                const [hours] = time24.split(':').map(Number);
+                const period = hours >= 12 ? 'PM' : 'AM';
+                const hour12 = hours % 12 || 12;
+                return `${hour12} ${period}`;
+              };
+
+              const parsedHours = dayNames.map((dayName, idx) => {
+                const config = venueData.opening_hours[dayName];
+                if (!config) return { day: dayLabels[idx], time: '6 AM - 9 PM' };
+                if (config.closed) return { day: dayLabels[idx], time: 'Closed' };
+                const open = convert24To12(config.open);
+                const close = convert24To12(config.close);
+                return { day: dayLabels[idx], time: `${open} - ${close}` };
+              });
+              
+              setOpeningHours(parsedHours);
+            }
+          }
+        } catch (err) {
+          console.error('[Settings] Failed to refresh opening hours:', err);
+        }
+      })();
+    }, [])
+  );
+
+  const onRefresh = useCallback(() => {
+    fetchData(true);
+  }, [fetchData]);
+
+  // Handle profile update
+  const handleSaveProfile = async () => {
+    setSaving(true);
+    try {
+      await updateProfile({
+        first_name: profile?.first_name,
+        last_name: profile?.last_name,
+        phone: contactNumber,
+      });
+      Alert.alert('Success', 'Profile updated successfully!');
+    } catch (err: any) {
+      Alert.alert('Error', err?.response?.data?.detail || 'Failed to update profile');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Handle password change
+  const handleChangePassword = async () => {
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      Alert.alert('Error', 'Please fill in all password fields');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      Alert.alert('Error', 'New passwords do not match');
+      return;
+    }
+    setSaving(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      Alert.alert('Success', 'Password changed successfully!');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err: any) {
+      Alert.alert('Error', err?.response?.data?.detail || 'Failed to change password');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Handle venue update
+  const handleSaveVenue = async () => {
+    setSaving(true);
+    try {
+      // Prepare data to send
+      const venueData: VenueUpdatePayload = {
+        name: complexName,
+        address: fullAddress,
+        postal_code: postalCode,
+        county: county,
+        website: website,
+        description: description,
+        location: location,
+        complex_type: complexType,
+        contact_number: contactNumber,
+        email_address: email,
+        status: complexStatus,
+        video_tour_url: videoTourUrl,
+        terms: termsConditions,
+      };
+
+      // If there are image files, send everything via FormData in one request
+      if (coverImageFile || galleryImageFiles.length > 0) {
+        setUploadingImages(true);
+        const updatedVenue = await updateVenue(venueData, {
+          cover_image_file: coverImageFile,
+          gallery_image_files: galleryImageFiles.length > 0 ? galleryImageFiles : undefined,
+        });
+        // Update state with response URLs
+        if (updatedVenue.cover_image) {
+          setCoverImageUri(updatedVenue.cover_image);
+        }
+        if (updatedVenue.gallery_images_json && Array.isArray(updatedVenue.gallery_images_json)) {
+          setGalleryImageUris(updatedVenue.gallery_images_json);
+        }
+        setVenue(updatedVenue);
+        // Clear file objects (already uploaded)
+        setCoverImageFile(null);
+        setGalleryImageFiles([]);
+        setUploadingImages(false);
+      } else {
+        // Just update text fields without files
+        const updatedVenue = await updateVenue(venueData);
+        setVenue(updatedVenue);
+      }
+
+      Alert.alert('Success', 'Venue details updated successfully!');
+      setEditComplexModalVisible(false);
+      // Refresh data
+      fetchData();
+    } catch (err: any) {
+      console.error('Venue update error:', err);
+      const errorMsg = err?.response?.data?.detail 
+        || (typeof err?.response?.data === 'object' ? JSON.stringify(err?.response?.data) : 'Failed to update venue');
+      Alert.alert('Error', errorMsg);
+      setUploadingImages(false);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   // Security Section State
   const [is2FAEnabled, setIs2FAEnabled] = useState(false);
@@ -37,48 +461,27 @@ export default function SettingsScreen() {
   const [currentPage, setCurrentPage] = useState(1);
 
   const roleOptions = ['All Roles', 'Reception', 'Game Supervisor', 'Maintenance', 'Manager'];
-  const shiftOptions = ['All Shifts', 'Morning (8AM-4PM)', 'Evening (4PM-12AM)', 'Night (12AM-8AM)'];
+  const shiftOptions = ['All Shifts', 'Morning (8AM-4PM)', 'Evening (4PM-12AM)', 'Night (12AM-8AM)', 'Flexible', 'Full-time'];
   const [showRoleOptions, setShowRoleOptions] = useState(false);
   const [showShiftOptions, setShowShiftOptions] = useState(false);
 
-  const [staffData, setStaffData] = useState([
-    {
-      id: 1,
-      name: 'Sarah Johnson',
-      role: 'Reception Staff',
-      shift: 'Morning',
-      status: 'On Duty',
-      statusDetail: '',
-      online: true,
-    },
-    {
-      id: 2,
-      name: 'Michael Chen',
-      role: 'Bowling Alley Supervisor',
-      shift: 'Evening',
-      status: 'Off Duty',
-      statusDetail: 'Starts at 4PM',
-      online: false,
-    },
-    {
-      id: 3,
-      name: 'David Wilson',
-      role: 'Facility Maintenance',
-      shift: 'Flexible',
-      status: 'On Duty',
-      statusDetail: 'Equipment Check',
-      online: true,
-    },
-    {
-      id: 4,
-      name: 'Emma Rodriguez',
-      role: 'Facility Manager',
-      shift: 'Full-time',
-      status: 'In Meeting',
-      statusDetail: '',
-      online: true,
-    },
-  ]);
+  const [staffData, setStaffData] = useState<StaffMemberType[]>([]);
+  const [staffLoading, setStaffLoading] = useState(false);
+
+  // Filter staff based on search and filters
+  const filteredStaffData = staffData.filter((staff) => {
+    const matchesSearch = staff.name.toLowerCase().includes(staffSearch.toLowerCase()) ||
+                         staff.phone.toLowerCase().includes(staffSearch.toLowerCase());
+    const matchesRole = roleFilter === 'All Roles' || staff.role === roleFilter;
+    const matchesShift = shiftFilter === 'All Shifts' || 
+      (shiftFilter === 'Morning (8AM-4PM)' && staff.shift === 'Morning') ||
+      (shiftFilter === 'Evening (4PM-12AM)' && staff.shift === 'Evening') ||
+      (shiftFilter === 'Night (12AM-8AM)' && staff.shift === 'Night') ||
+      (shiftFilter === 'Flexible' && staff.shift === 'Flexible') ||
+      (shiftFilter === 'Full-time' && staff.shift === 'Full-time');
+    
+    return matchesSearch && matchesRole && matchesShift;
+  });
 
   // Add Staff modal & fields
   const [addStaffModalVisible, setAddStaffModalVisible] = useState(false);
@@ -86,11 +489,31 @@ export default function SettingsScreen() {
   const [newStaffRole, setNewStaffRole] = useState('');
   const [newStaffShift, setNewStaffShift] = useState('Morning');
   const [newStaffPhone, setNewStaffPhone] = useState('');
+  const [newStaffPhotoUri, setNewStaffPhotoUri] = useState<string | null>(null);
+  const [newStaffPhotoFile, setNewStaffPhotoFile] = useState<{ uri: string; name: string; type: string } | null>(null);
   const [showNewStaffRoleOptions, setShowNewStaffRoleOptions] = useState(false);
   const [showNewStaffShiftOptions, setShowNewStaffShiftOptions] = useState(false);
   const addStaffScrollRef = useRef<ScrollView | null>(null);
   const editModalScrollRef = useRef<ScrollView | null>(null);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  // Staff detail modal
+  const [staffDetailModalVisible, setStaffDetailModalVisible] = useState(false);
+  const [selectedStaff, setSelectedStaff] = useState<StaffMemberType | null>(null);
+  
+  // Edit staff mode
+  const [isEditingStaff, setIsEditingStaff] = useState(false);
+  const [editedStaffName, setEditedStaffName] = useState('');
+  const [editedStaffRole, setEditedStaffRole] = useState('');
+  const [editedStaffShift, setEditedStaffShift] = useState('');
+  const [editedStaffPhone, setEditedStaffPhone] = useState('');
+  const [editedStaffStatus, setEditedStaffStatus] = useState('');
+  const [editedStaffStatusDetail, setEditedStaffStatusDetail] = useState('');
+  const [editedStaffPhotoUri, setEditedStaffPhotoUri] = useState<string | null>(null);
+  const [editedStaffPhotoFile, setEditedStaffPhotoFile] = useState<{ uri: string; name: string; type: string } | null>(null);
+  const [showEditStaffRoleOptions, setShowEditStaffRoleOptions] = useState(false);
+  const [showEditStaffShiftOptions, setShowEditStaffShiftOptions] = useState(false);
+  const [showEditStaffStatusOptions, setShowEditStaffStatusOptions] = useState(false);
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
@@ -110,11 +533,11 @@ export default function SettingsScreen() {
 
   // Opening hours sample (editable)
   const [openingHours, setOpeningHours] = useState([
-    { day: 'Monday', time: '06:09 AM - 09:09 PM' },
-    { day: 'Tuesday', time: '03:09 AM - 03:09 PM' },
-    { day: 'Wednesday', time: '03:09 AM - 03:10 PM' },
-    { day: 'Thursday', time: '02:00 AM - 11:00 PM' },
-    { day: 'Friday', time: '04:00 AM - 10:00 PM' },
+    { day: 'Monday', time: '6 AM - 9 PM' },
+    { day: 'Tuesday', time: '6 AM - 9 PM' },
+    { day: 'Wednesday', time: '6 AM - 9 PM' },
+    { day: 'Thursday', time: '6 AM - 11 PM' },
+    { day: 'Friday', time: '6 AM - 10 PM' },
     { day: 'Saturday', time: 'Closed' },
     { day: 'Sunday', time: 'Closed' },
   ]);
@@ -138,6 +561,19 @@ export default function SettingsScreen() {
   const [termsConditions, setTermsConditions] = useState('');
   const [socialLinks, setSocialLinks] = useState<{ platform: string; url: string }[]>([]);
 
+  // Cover Image & Gallery Images State
+  const [coverImageUri, setCoverImageUri] = useState<string | null>(null);
+  const [coverImageFile, setCoverImageFile] = useState<{ uri: string; name: string; type: string } | null>(null);
+  const [galleryImageUris, setGalleryImageUris] = useState<string[]>([]);
+  const [galleryImageFiles, setGalleryImageFiles] = useState<{ uri: string; name: string; type: string }[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
+  const [galleryViewerVisible, setGalleryViewerVisible] = useState(false);
+  const [galleryViewerIndex, setGalleryViewerIndex] = useState(0);
+
+  // Staff photo viewer
+  const [staffPhotoViewerVisible, setStaffPhotoViewerVisible] = useState(false);
+  const [staffPhotoViewerUri, setStaffPhotoViewerUri] = useState<string | null>(null);
+
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editableHours, setEditableHours] = useState(() =>
     openingHours.map((o) => {
@@ -158,10 +594,62 @@ export default function SettingsScreen() {
     setEditModalVisible(true);
   };
 
-  const saveOpeningHours = () => {
-    const newHours = editableHours.map((e) => ({ day: e.day, time: e.closed ? 'Closed' : `${e.open} - ${e.close}` }));
-    setOpeningHours(newHours);
-    setEditModalVisible(false);
+  const saveOpeningHours = async () => {
+    try {
+      setSaving(true);
+      
+      // Convert display format to backend format
+      const convertTime12To24 = (time12: string): string => {
+        if (!time12) return '00:00';
+        const match = time12.trim().match(/(\d{1,2})\s*(AM|PM)/i);
+        if (!match) return '00:00';
+        let hours = parseInt(match[1], 10);
+        const period = match[2].toUpperCase();
+        
+        if (period === 'PM' && hours !== 12) hours += 12;
+        if (period === 'AM' && hours === 12) hours = 0;
+        
+        return `${hours.toString().padStart(2, '0')}:00`;
+      };
+
+      // Build backend opening_hours JSON
+      const backendHours: Record<string, any> = {};
+      const dayNames = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+      
+      editableHours.forEach((hour, idx) => {
+        const dayName = dayNames[idx];
+        if (hour.closed) {
+          backendHours[dayName] = { open: '', close: '', closed: true };
+        } else {
+          backendHours[dayName] = {
+            open: convertTime12To24(hour.open),
+            close: convertTime12To24(hour.close),
+            closed: false,
+          };
+        }
+      });
+
+      console.log('[Settings] Saving opening_hours to backend:', JSON.stringify(backendHours, null, 2));
+      console.log('[Settings] dayNames mapping:', ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map((day, i) => `${i}: ${day}`));
+      console.log('[Settings] editableHours mapping:', editableHours.map((h, i) => `${i}: ${h.day} - ${h.closed ? 'CLOSED' : h.open + ' to ' + h.close}`));
+
+      // Save to backend
+      const response = await updateVenue({ opening_hours: backendHours });
+      console.log('[Settings] Backend response opening_hours:', JSON.stringify(response?.opening_hours, null, 2));
+      console.log('[Settings] Saturday saved as:', JSON.stringify(backendHours['saturday'], null, 2));
+      console.log('[Settings] Monday saved as:', JSON.stringify(backendHours['monday'], null, 2));
+      
+      // Update display format for UI
+      const newHours = editableHours.map((e) => ({ day: e.day, time: e.closed ? 'Closed' : `${e.open} - ${e.close}` }));
+      setOpeningHours(newHours);
+      
+      Alert.alert('Success', 'Opening hours updated successfully!');
+      setEditModalVisible(false);
+    } catch (err: any) {
+      Alert.alert('Error', err?.response?.data?.detail || 'Failed to update opening hours');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const cancelEdit = () => setEditModalVisible(false);
@@ -169,23 +657,19 @@ export default function SettingsScreen() {
   // Inline time picker state
   const [expandedTimeField, setExpandedTimeField] = useState<string | null>(null); // "dayIdx-field" format
   const [pickerHour, setPickerHour] = useState(6);
-  const [pickerMinute, setPickerMinute] = useState(0);
   const [pickerAmPm, setPickerAmPm] = useState<'AM' | 'PM'>('AM');
 
-  const formatTime = (h: number, m: number, ap: 'AM' | 'PM') => {
-    const hh = h < 10 ? `0${h}` : `${h}`;
-    const mm = m < 10 ? `0${m}` : `${m}`;
-    return `${hh}:${mm} ${ap}`;
+  const formatTime = (h: number, ap: 'AM' | 'PM') => {
+    return `${h} ${ap}`;
   };
 
   const parseTimeString = (s: string) => {
-    if (!s) return { h: 6, m: 0, ap: 'AM' as 'AM' | 'PM' };
-    const m = String(s).trim().match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-    if (!m) return { h: 6, m: 0, ap: 'AM' as 'AM' | 'PM' };
-    let h = parseInt(m[1], 10);
-    const mm = parseInt(m[2], 10);
-    const ap = (m[3].toUpperCase() === 'PM' ? 'PM' : 'AM') as 'AM' | 'PM';
-    return { h, m: mm, ap };
+    if (!s) return { h: 6, ap: 'AM' as 'AM' | 'PM' };
+    const m = String(s).trim().match(/(\d{1,2})\s*(AM|PM)/i);
+    if (!m) return { h: 6, ap: 'AM' as 'AM' | 'PM' };
+    const h = parseInt(m[1], 10);
+    const ap = (m[2].toUpperCase() === 'PM' ? 'PM' : 'AM') as 'AM' | 'PM';
+    return { h, ap };
   };
 
   const toggleTimePicker = (dayIdx: number, field: 'open' | 'close') => {
@@ -196,7 +680,6 @@ export default function SettingsScreen() {
       const current = editableHours[dayIdx]?.[field] ?? '';
       const parsed = parseTimeString(current);
       setPickerHour(parsed.h);
-      setPickerMinute(parsed.m);
       setPickerAmPm(parsed.ap);
       setExpandedTimeField(key);
     }
@@ -206,7 +689,7 @@ export default function SettingsScreen() {
     if (!expandedTimeField) return;
     const [dayIdxStr, field] = expandedTimeField.split('-');
     const dayIdx = parseInt(dayIdxStr, 10);
-    const formatted = formatTime(pickerHour, pickerMinute, pickerAmPm);
+    const formatted = formatTime(pickerHour, pickerAmPm);
     const copy = [...editableHours];
     copy[dayIdx] = { ...copy[dayIdx], [field as 'open' | 'close']: formatted };
     setEditableHours(copy);
@@ -252,18 +735,23 @@ export default function SettingsScreen() {
             {/* Profile Header Card */}
             <View style={styles.profileCard}>
               <View style={styles.profileRow}>
-                <View style={styles.profileImagePlaceholder}>
-                  <Text style={styles.placeholderText}>Default{'\n'}Complex{'\n'}Image</Text>
-                </View>
+                {coverImageUri ? (
+                  <Image source={{ uri: coverImageUri }} style={{ width: 70, height: 70, borderRadius: 8, backgroundColor: '#E5E7EB' }} resizeMode="cover" />
+                ) : (
+                  <View style={styles.profileImagePlaceholder}>
+                    <Ionicons name="business" size={28} color="#9CA3AF" />
+                    <Text style={styles.placeholderText}>No Image</Text>
+                  </View>
+                )}
                 <View style={styles.profileInfo}>
-                  <Text style={styles.complexName}>Kanzul sport's complex</Text>
+                  <Text style={styles.complexName}>{complexName || 'Your Complex'}</Text>
                   <View style={styles.tagRow}>
                     <View style={styles.indoorTag}>
-                      <Text style={styles.indoorTagText}>Indoor</Text>
+                      <Text style={styles.indoorTagText}>{complexType || 'Indoor'}</Text>
                     </View>
                     <View style={styles.locationRow}>
                       <Ionicons name="location" size={14} color="#6B7280" />
-                      <Text style={styles.locationText}>Sri Lanka</Text>
+                      <Text style={styles.locationText}>{location || county || 'Not set'}</Text>
                     </View>
                   </View>
                 </View>
@@ -283,20 +771,20 @@ export default function SettingsScreen() {
               <View style={styles.cardGrid}>
                 <View style={styles.gridItem}>
                   <Text style={styles.label}>Email Address</Text>
-                  <Text style={styles.value}>maleensaman@gmail.com</Text>
+                  <Text style={styles.value}>{email || '-'}</Text>
                 </View>
                 <View style={styles.gridItem}>
                   <Text style={styles.label}>Website</Text>
-                  <Text style={styles.value}>-</Text>
+                  <Text style={styles.value}>{website || '-'}</Text>
                 </View>
                 <View style={styles.gridItem}>
                   <Text style={styles.label}>Contact Number</Text>
-                  <Text style={styles.value}>0761265772</Text>
+                  <Text style={styles.value}>{contactNumber || '-'}</Text>
                 </View>
                 <View style={styles.gridItem}>
                   <Text style={styles.label}>Status</Text>
-                  <View style={styles.statusBadge}>
-                    <Text style={styles.statusText}>Active</Text>
+                  <View style={[styles.statusBadge, complexStatus !== 'Active' && { backgroundColor: '#FEE2E2' }]}>
+                    <Text style={[styles.statusText, complexStatus !== 'Active' && { color: '#DC2626' }]}>{complexStatus || 'Active'}</Text>
                   </View>
                 </View>
               </View>
@@ -310,20 +798,20 @@ export default function SettingsScreen() {
               </View>
               <View style={styles.cardGrid}>
                 <View style={styles.gridItem}>
-                  <Text style={styles.label}>County</Text>
-                  <Text style={styles.value}>Sri Lanka</Text>
+                  <Text style={styles.label}>Country</Text>
+                  <Text style={styles.value}>{county || '-'}</Text>
                 </View>
                 <View style={styles.gridItem}>
-                  <Text style={styles.label}>Location</Text>
-                  <Text style={styles.value} numberOfLines={1}>7.1228752, 80.0720273</Text>
+                  <Text style={styles.label}>City / Location</Text>
+                  <Text style={styles.value} numberOfLines={1}>{location || '-'}</Text>
                 </View>
                 <View style={styles.gridItemFull}>
                   <Text style={styles.label}>Full Address</Text>
-                  <Text style={styles.value}>Warana Rd, Kalagedihena</Text>
+                  <Text style={styles.value}>{fullAddress || '-'}</Text>
                 </View>
                 <View style={styles.gridItemFull}>
                   <Text style={styles.label}>Postal Code</Text>
-                  <Text style={styles.value}>43500</Text>
+                  <Text style={styles.value}>{postalCode || '-'}</Text>
                 </View>
               </View>
             </View>
@@ -346,13 +834,40 @@ export default function SettingsScreen() {
                 <Ionicons name="images" size={18} color="#2563EB" />
                 <Text style={styles.cardTitle}>Media</Text>
               </View>
+              {/* Cover Image Section */}
+              <View style={styles.cardBody}>
+                <Text style={styles.label}>Cover Image</Text>
+                {coverImageUri ? (
+                  <TouchableOpacity onPress={() => { setGalleryViewerIndex(-1); setGalleryViewerVisible(true); }}>
+                    <Image source={{ uri: coverImageUri }} style={{ width: '100%', height: 160, borderRadius: 8, marginTop: 8 }} resizeMode="cover" />
+                  </TouchableOpacity>
+                ) : (
+                  <Text style={styles.valueGray}>No cover image uploaded</Text>
+                )}
+              </View>
               <View style={styles.cardBody}>
                 <Text style={styles.label}>Video Tour URL</Text>
-                <Text style={styles.valueGray}>Not available</Text>
+                {videoTourUrl ? (
+                  <TouchableOpacity onPress={() => Linking.openURL(videoTourUrl)}>
+                    <Text style={{ color: '#2563EB', fontSize: 13, marginTop: 4 }}>{videoTourUrl}</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <Text style={styles.valueGray}>Not available</Text>
+                )}
               </View>
               <View style={styles.cardBody}>
                 <Text style={styles.label}>Gallery Images</Text>
-                <Text style={styles.valueGray}>No gallery images available</Text>
+                {galleryImageUris.length > 0 ? (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                    {galleryImageUris.map((uri, idx) => (
+                      <TouchableOpacity key={idx} onPress={() => { setGalleryViewerIndex(idx); setGalleryViewerVisible(true); }}>
+                        <Image source={{ uri }} style={{ width: 80, height: 80, borderRadius: 8 }} resizeMode="cover" />
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ) : (
+                  <Text style={styles.valueGray}>No gallery images available</Text>
+                )}
               </View>
             </View>
 
@@ -364,11 +879,11 @@ export default function SettingsScreen() {
               </View>
               <View style={styles.cardBody}>
                 <Text style={styles.label}>Description</Text>
-                <Text style={styles.valueGray}>-</Text>
+                <Text style={styles.valueGray}>{description || '-'}</Text>
               </View>
               <View style={styles.cardBody}>
                 <Text style={styles.label}>Terms & Conditions</Text>
-                <Text style={styles.valueGray}>-</Text>
+                <Text style={styles.valueGray}>{termsConditions || '-'}</Text>
               </View>
               <View style={styles.cardBody}>
                 <Text style={styles.label}>Social Links</Text>
@@ -473,11 +988,50 @@ export default function SettingsScreen() {
             </View>
 
             <View style={styles.staffCardsGrid}>
-              {staffData.slice((currentPage - 1) * 6, currentPage * 6).map((staff) => (
-                <View key={staff.id} style={styles.staffCardItem}>
+              {staffLoading ? (
+                <View style={{ padding: 40, alignItems: 'center', width: '100%' }}>
+                  <ActivityIndicator size="large" color="#2563EB" />
+                  <Text style={{ color: '#6B7280', marginTop: 8 }}>Loading staff...</Text>
+                </View>
+              ) : filteredStaffData.length === 0 ? (
+                <View style={{ padding: 40, alignItems: 'center', width: '100%' }}>
+                  <Ionicons name="people-outline" size={48} color="#D1D5DB" />
+                  <Text style={{ color: '#6B7280', marginTop: 8, fontSize: 15 }}>
+                    {staffSearch || roleFilter !== 'All Roles' || shiftFilter !== 'All Shifts' 
+                      ? 'No staff matches your search' 
+                      : 'No staff members yet'}
+                  </Text>
+                  <Text style={{ color: '#9CA3AF', fontSize: 13 }}>
+                    {staffSearch || roleFilter !== 'All Roles' || shiftFilter !== 'All Shifts'
+                      ? 'Try adjusting your filters'
+                      : 'Tap "Add Staff" to get started'}
+                  </Text>
+                </View>
+              ) : (
+              filteredStaffData.slice((currentPage - 1) * 6, currentPage * 6).map((staff) => (
+                <TouchableOpacity key={staff.id} style={styles.staffCardItem} onPress={() => {
+                  setSelectedStaff(staff);
+                  setStaffDetailModalVisible(true);
+                }}>
                   <View style={styles.staffCardImageContainer}>
-                    <View style={styles.staffImage} />
-                    {staff.online ? (
+                    <TouchableOpacity 
+                      onPress={() => {
+                        if (staff.photo) {
+                          setStaffPhotoViewerUri(staff.photo);
+                          setStaffPhotoViewerVisible(true);
+                        }
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      {staff.photo ? (
+                        <Image source={{ uri: staff.photo }} style={styles.staffImage} />
+                      ) : (
+                        <View style={[styles.staffImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#F3F4F6' }]}>
+                          <Ionicons name="person" size={32} color="#D1D5DB" />
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                    {staff.is_online ? (
                       <View style={styles.statusBadgeOnline}>
                         <Ionicons name="checkmark-circle" size={24} color="#15803D" />
                       </View>
@@ -496,19 +1050,47 @@ export default function SettingsScreen() {
                     <TouchableOpacity style={styles.actionIconBtn}>
                       <Ionicons name="calendar-outline" size={16} color="#2563EB" />
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.actionIconBtn}>
+                    <TouchableOpacity 
+                      style={styles.actionIconBtn}
+                      onPress={() => {
+                        if (!staff.phone) {
+                          Alert.alert('Error', 'No phone number available for this staff member.');
+                          return;
+                        }
+                        Linking.openURL(`tel:${staff.phone}`).catch(() => {
+                          Alert.alert('Error', 'Unable to make call. Please try again.');
+                        });
+                      }}
+                    >
                       <Ionicons name="call-outline" size={16} color="#06B6D4" />
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.actionIconBtn}>
-                      <Ionicons name="ellipsis-horizontal" size={16} color="#6B7280" />
+                    <TouchableOpacity style={styles.actionIconBtn} onPress={() => {
+                      Alert.alert(
+                        'Delete Staff',
+                        `Are you sure you want to remove ${staff.name}?`,
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          { text: 'Delete', style: 'destructive', onPress: async () => {
+                            try {
+                              await deleteStaffMember(staff.id);
+                              fetchStaff();
+                            } catch (err) {
+                              Alert.alert('Error', 'Failed to delete staff member.');
+                            }
+                          }},
+                        ]
+                      );
+                    }}>
+                      <Ionicons name="trash-outline" size={16} color="#EF4444" />
                     </TouchableOpacity>
                   </View>
                   <View style={styles.statusLine}>
                     <Text style={styles.statusLineText}>Currently: {staff.status}</Text>
-                    {staff.statusDetail ? <Text style={styles.statusDetailText}>({staff.statusDetail})</Text> : null}
+                    {staff.status_detail ? <Text style={styles.statusDetailText}>({staff.status_detail})</Text> : null}
                   </View>
-                </View>
-              ))}
+                </TouchableOpacity>
+              ))
+              )}
             </View>
 
             <View style={styles.paginationSection}>
@@ -516,14 +1098,14 @@ export default function SettingsScreen() {
                 <Text style={[styles.pageBtnText, currentPage === 1 && styles.pageBtnTextDisabled]}>Previous</Text>
               </TouchableOpacity>
               <View style={styles.pageNumbers}>
-                {Array.from({ length: Math.ceil(staffData.length / 6) }, (_, i) => i + 1).map((page) => (
+                {Array.from({ length: Math.ceil(filteredStaffData.length / 6) }, (_, i) => i + 1).map((page) => (
                   <TouchableOpacity key={page} style={[styles.pageNum, page === currentPage && styles.pageNumActive]} onPress={() => setCurrentPage(page)}>
                     <Text style={[styles.pageNumText, page === currentPage && styles.pageNumTextActive]}>{page}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
-              <TouchableOpacity style={[styles.pageBtn, currentPage === Math.ceil(staffData.length / 6) && styles.pageBtnDisabled]} onPress={() => currentPage < Math.ceil(staffData.length / 6) && setCurrentPage(currentPage + 1)} disabled={currentPage === Math.ceil(staffData.length / 6)}>
-                <Text style={[styles.pageBtnText, currentPage === Math.ceil(staffData.length / 6) && styles.pageBtnTextDisabled]}>Next</Text>
+              <TouchableOpacity style={[styles.pageBtn, currentPage === Math.ceil(filteredStaffData.length / 6) && styles.pageBtnDisabled]} onPress={() => currentPage < Math.ceil(filteredStaffData.length / 6) && setCurrentPage(currentPage + 1)} disabled={currentPage === Math.ceil(filteredStaffData.length / 6)}>
+                <Text style={[styles.pageBtnText, currentPage === Math.ceil(filteredStaffData.length / 6) && styles.pageBtnTextDisabled]}>Next</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -616,9 +1198,9 @@ export default function SettingsScreen() {
                 </View>
               </View>
 
-              <TouchableOpacity style={styles.updateButton}>
+              <TouchableOpacity style={[styles.updateButton, saving && { opacity: 0.6 }]} onPress={handleChangePassword} disabled={saving}>
                 <Ionicons name="save-outline" size={20} color="#fff" />
-                <Text style={styles.updateButtonText}>Update Password</Text>
+                <Text style={styles.updateButtonText}>{saving ? 'Updating...' : 'Update Password'}</Text>
               </TouchableOpacity>
             </View>
 
@@ -795,48 +1377,44 @@ export default function SettingsScreen() {
                   {/* Inline Time Picker */}
                   {(isOpenExpanded || isCloseExpanded) && (
                     <View style={styles.inlinePickerContainer}>
-                      <Text style={styles.inlinePickerLabel}>Select Time</Text>
-                      <View style={styles.inlinePickerRow}>
-                        <View style={styles.inlinePickerCol}>
-                          <Text style={styles.inlinePickerColLabel}>Hour</Text>
-                          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 8 }}>
-                            {Array.from({ length: 12 }, (_, i) => i + 1).map((h) => (
-                              <TouchableOpacity key={h} style={[styles.inlinePickerBtn, pickerHour === h && styles.inlinePickerBtnActive]} onPress={() => setPickerHour(h)}>
-                                <Text style={[styles.inlinePickerBtnText, pickerHour === h && styles.inlinePickerBtnTextActive]}>{h}</Text>
-                              </TouchableOpacity>
-                            ))}
-                          </ScrollView>
-                        </View>
+                      <Text style={styles.inlinePickerLabel}>Select Hour</Text>
 
-                        <View style={styles.inlinePickerCol}>
-                          <Text style={styles.inlinePickerColLabel}>Minute</Text>
-                          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 8 }}>
-                            {[0, 15, 30, 45].map((m) => (
-                              <TouchableOpacity key={m} style={[styles.inlinePickerBtn, pickerMinute === m && styles.inlinePickerBtnActive]} onPress={() => setPickerMinute(m)}>
-                                <Text style={[styles.inlinePickerBtnText, pickerMinute === m && styles.inlinePickerBtnTextActive]}>{m < 10 ? `0${m}` : `${m}`}</Text>
-                              </TouchableOpacity>
-                            ))}
-                          </ScrollView>
-                        </View>
-
-                        <View style={styles.inlinePickerCol}>
-                          <Text style={styles.inlinePickerColLabel}>AM/PM</Text>
-                          <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-                            {(['AM', 'PM'] as const).map((ap) => (
-                              <TouchableOpacity key={ap} style={[styles.inlineAmpmBtn, pickerAmPm === ap && styles.inlineAmpmBtnActive]} onPress={() => setPickerAmPm(ap)}>
-                                <Text style={[styles.inlineAmpmBtnText, pickerAmPm === ap && styles.inlineAmpmBtnTextActive]}>{ap}</Text>
-                              </TouchableOpacity>
-                            ))}
-                          </View>
-                        </View>
+                      {/* AM/PM Toggle */}
+                      <View style={styles.ampmToggleRow}>
+                        {(['AM', 'PM'] as const).map((ap) => (
+                          <TouchableOpacity
+                            key={ap}
+                            style={[styles.ampmToggleBtn, pickerAmPm === ap && styles.ampmToggleBtnActive]}
+                            onPress={() => setPickerAmPm(ap)}
+                          >
+                            <Text style={[styles.ampmToggleBtnText, pickerAmPm === ap && styles.ampmToggleBtnTextActive]}>{ap}</Text>
+                          </TouchableOpacity>
+                        ))}
                       </View>
 
-                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12, gap: 8 }}>
+                      {/* Hour Grid (4 columns x 3 rows) */}
+                      <View style={styles.hourGrid}>
+                        {Array.from({ length: 12 }, (_, i) => i + 1).map((h) => (
+                          <TouchableOpacity
+                            key={h}
+                            style={[styles.hourGridBtn, pickerHour === h && styles.hourGridBtnActive]}
+                            onPress={() => {
+                              setPickerHour(h);
+                            }}
+                          >
+                            <Text style={[styles.hourGridBtnText, pickerHour === h && styles.hourGridBtnTextActive]}>
+                              {h} {pickerAmPm}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+
+                      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 14, gap: 8 }}>
                         <TouchableOpacity style={styles.inlinePickerCancelBtn} onPress={() => setExpandedTimeField(null)}>
                           <Text style={styles.inlinePickerCancelText}>Cancel</Text>
                         </TouchableOpacity>
                         <TouchableOpacity style={styles.inlinePickerSaveBtn} onPress={saveTimeSelection}>
-                          <Text style={styles.inlinePickerSaveText}>Save</Text>
+                          <Text style={styles.inlinePickerSaveText}>Set</Text>
                         </TouchableOpacity>
                       </View>
                     </View>
@@ -868,6 +1446,23 @@ export default function SettingsScreen() {
                   <Pressable onPress={() => setAddStaffModalVisible(false)} style={styles.modalCloseBtn}><Ionicons name="close" size={20} color="#fff" /></Pressable>
                 </View>
                 <ScrollView ref={addStaffScrollRef} contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled">
+                  <Text style={styles.fieldLabel}>Photo (Optional)</Text>
+                  <TouchableOpacity style={styles.photoPickerBtn} onPress={pickStaffPhoto}>
+                    {newStaffPhotoUri ? (
+                      <>
+                        <Image source={{ uri: newStaffPhotoUri }} style={{ width: '100%', height: 180, borderRadius: 8 }} />
+                        <View style={{ position: 'absolute', bottom: 8, right: 8, backgroundColor: '#fff', borderRadius: 20, padding: 6 }}>
+                          <Ionicons name="pencil" size={16} color="#2563EB" />
+                        </View>
+                      </>
+                    ) : (
+                      <View style={styles.photoPickerPlaceholder}>
+                        <Ionicons name="camera" size={32} color="#9CA3AF" />
+                        <Text style={styles.photoPickerText}>Tap to add photo</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+
                   <Text style={styles.fieldLabel}>Name *</Text>
                   <TextInput style={styles.input} placeholder="Enter full name" placeholderTextColor="#9CA3AF" selectionColor="#0EA5E9" value={newStaffName} onChangeText={setNewStaffName} onFocus={() => {
                     setTimeout(() => addStaffScrollRef.current?.scrollToEnd({ animated: true }), 120);
@@ -923,12 +1518,36 @@ export default function SettingsScreen() {
 
                   <View style={styles.modalActions}>
                     <TouchableOpacity style={styles.cancelBtn} onPress={() => setAddStaffModalVisible(false)}><Text style={styles.cancelText}>Cancel</Text></TouchableOpacity>
-                    <TouchableOpacity style={styles.bookBtn} onPress={() => {
-                      const newStaff = { id: Date.now(), name: newStaffName || 'New Staff', role: newStaffRole || 'Staff', shift: newStaffShift || 'Morning', contact: newStaffPhone || '', status: 'On Duty', statusDetail: '', online: true };
-                      setStaffData([newStaff, ...staffData]);
-                      setAddStaffModalVisible(false);
-                      setNewStaffName(''); setNewStaffRole(''); setNewStaffShift('Morning'); setNewStaffPhone('');
-                    }}><Text style={styles.bookText}>Save Staff</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.bookBtn} onPress={async () => {
+                      if (!newStaffName.trim()) { Alert.alert('Error', 'Name is required.'); return; }
+                      if (!newStaffRole) { Alert.alert('Error', 'Role is required.'); return; }
+                      if (!newStaffPhone.trim()) { Alert.alert('Error', 'Phone number is required.'); return; }
+                      try {
+                        setSaving(true);
+                        // Map display shift to backend value (strip time info)
+                        const shiftValue = newStaffShift.split(' (')[0] || 'Morning';
+                        await createStaffMember({
+                          name: newStaffName.trim(),
+                          role: newStaffRole,
+                          shift: shiftValue,
+                          phone: newStaffPhone.trim(),
+                          photo: newStaffPhotoFile || undefined,
+                          status: 'On Duty',
+                          is_online: true,
+                        });
+                        setAddStaffModalVisible(false);
+                        setNewStaffName(''); setNewStaffRole(''); setNewStaffShift('Morning'); setNewStaffPhone('');
+                        setNewStaffPhotoUri(null); setNewStaffPhotoFile(null);
+                        fetchStaff(); // Refresh from backend
+                        Alert.alert('Success', 'Staff member added successfully.');
+                      } catch (err: any) {
+                        console.error('Failed to create staff:', err);
+                        const msg = err?.response?.data?.detail || err?.response?.data?.name?.[0] || 'Failed to add staff member.';
+                        Alert.alert('Error', msg);
+                      } finally {
+                        setSaving(false);
+                      }
+                    }}><Text style={styles.bookText}>{saving ? 'Saving...' : 'Save Staff'}</Text></TouchableOpacity>
                   </View>
                 </ScrollView>
               </View>
@@ -971,10 +1590,21 @@ export default function SettingsScreen() {
               </View>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>Cover Image</Text>
-                <TouchableOpacity style={styles.editComplexFileBtn}>
+                <TouchableOpacity style={styles.editComplexFileBtn} onPress={pickCoverImage}>
                   <Text style={styles.editComplexFileBtnText}>Choose File</Text>
-                  <Text style={styles.editComplexFileName}>No file chosen</Text>
+                  <Text style={styles.editComplexFileName}>{coverImageFile ? coverImageFile.name : (coverImageUri ? 'Current image loaded' : 'No file chosen')}</Text>
                 </TouchableOpacity>
+                {coverImageUri && (
+                  <View style={{ marginTop: 8, borderRadius: 8, overflow: 'hidden' }}>
+                    <Image source={{ uri: coverImageUri }} style={{ width: '100%', height: 100, borderRadius: 8 }} resizeMode="cover" />
+                    <TouchableOpacity 
+                      onPress={() => { setCoverImageUri(null); setCoverImageFile(null); }}
+                      style={{ position: 'absolute', top: 4, right: 4, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 12, padding: 4 }}
+                    >
+                      <Ionicons name="close" size={14} color="#fff" />
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
             </View>
 
@@ -1054,14 +1684,26 @@ export default function SettingsScreen() {
               <TextInput style={styles.editComplexInput} value={videoTourUrl} onChangeText={setVideoTourUrl} placeholder="Video Tour URL" placeholderTextColor="#9CA3AF" />
             </View>
             <View style={styles.editComplexGalleryBox}>
-              <Text style={styles.editComplexLabel}>Gallery Images (Upload 4 at a time)</Text>
-              <TouchableOpacity style={styles.editComplexFileBtn}>
+              <Text style={styles.editComplexLabel}>Gallery Images (Select up to 4 at a time)</Text>
+              <TouchableOpacity style={styles.editComplexFileBtn} onPress={pickGalleryImages}>
                 <Text style={styles.editComplexFileBtnText}>Choose Files</Text>
-                <Text style={styles.editComplexFileName}>No file chosen</Text>
+                <Text style={styles.editComplexFileName}>{galleryImageFiles.length > 0 ? `${galleryImageFiles.length} new file(s) selected` : (galleryImageUris.length > 0 ? `${galleryImageUris.length} image(s)` : 'No file chosen')}</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.editComplexUploadBtn}>
-                <Text style={styles.editComplexUploadBtnText}>Upload</Text>
-              </TouchableOpacity>
+              {galleryImageUris.length > 0 && (
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+                  {galleryImageUris.map((uri, idx) => (
+                    <View key={idx} style={{ position: 'relative', width: 72, height: 72 }}>
+                      <Image source={{ uri }} style={{ width: 72, height: 72, borderRadius: 8 }} resizeMode="cover" />
+                      <TouchableOpacity 
+                        onPress={() => removeGalleryImage(idx)}
+                        style={{ position: 'absolute', top: 2, right: 2, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 10, padding: 2 }}
+                      >
+                        <Ionicons name="close" size={12} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
             </View>
 
             {/* Additional Details */}
@@ -1090,8 +1732,15 @@ export default function SettingsScreen() {
               <TouchableOpacity style={styles.editComplexCancelBtn} onPress={() => setEditComplexModalVisible(false)}>
                 <Text style={styles.editComplexCancelText}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.editComplexSaveBtn} onPress={() => { console.log('Save complex details'); setEditComplexModalVisible(false); }}>
-                <Text style={styles.editComplexSaveText}>Save Changes</Text>
+              <TouchableOpacity style={styles.editComplexSaveBtn} onPress={handleSaveVenue} disabled={saving || uploadingImages}>
+                {(saving || uploadingImages) ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <ActivityIndicator size="small" color="#fff" />
+                    <Text style={styles.editComplexSaveText}>{uploadingImages ? 'Uploading...' : 'Saving...'}</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.editComplexSaveText}>Save Changes</Text>
+                )}
               </TouchableOpacity>
             </View>
                 </ScrollView>
@@ -1099,6 +1748,309 @@ export default function SettingsScreen() {
             </View>
           </TouchableWithoutFeedback>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Staff Detail Modal */}
+      <Modal visible={staffDetailModalVisible} animationType="fade" transparent presentationStyle="overFullScreen" onRequestClose={() => {
+        if (isEditingStaff) {
+          setIsEditingStaff(false);
+        } else {
+          setStaffDetailModalVisible(false);
+        }
+      }}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)', justifyContent: 'center', alignItems: 'center', padding: 16 }}>
+          <View style={{ backgroundColor: '#fff', borderRadius: 16, width: '100%', maxWidth: 420, maxHeight: '85%', overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 8 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16, borderBottomWidth: 1, borderBottomColor: '#E5E7EB', backgroundColor: '#F9FAFB' }}>
+              <Text style={{ fontSize: 18, fontWeight: '700', color: '#111827' }}>{isEditingStaff ? 'Edit Staff' : 'Staff Details'}</Text>
+              <TouchableOpacity onPress={() => {
+                if (isEditingStaff) {
+                  setIsEditingStaff(false);
+                } else {
+                  setStaffDetailModalVisible(false);
+                }
+              }}>
+                <Ionicons name="close" size={24} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={{ padding: 20 }} contentContainerStyle={{ paddingBottom: 16 }}>
+              {selectedStaff && (
+                <>
+                  {isEditingStaff ? (
+                    // EDIT MODE
+                    <>
+                      {/* Photo */}
+                      <View style={{ alignItems: 'center', marginBottom: 20 }}>
+                        <TouchableOpacity onPress={pickEditStaffPhoto} style={{ position: 'relative' }}>
+                          {editedStaffPhotoUri ? (
+                            <Image source={{ uri: editedStaffPhotoUri }} style={{ width: 100, height: 100, borderRadius: 50, backgroundColor: '#E5E7EB' }} />
+                          ) : (
+                            <View style={{ width: 100, height: 100, borderRadius: 50, backgroundColor: '#F3F4F6', justifyContent: 'center', alignItems: 'center' }}>
+                              <Ionicons name="person" size={44} color="#D1D5DB" />
+                            </View>
+                          )}
+                          <View style={{ position: 'absolute', bottom: 0, right: 0, backgroundColor: '#3B82F6', borderRadius: 20, padding: 6 }}>
+                            <Ionicons name="camera" size={14} color="#fff" />
+                          </View>
+                        </TouchableOpacity>
+                        <Text style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>Tap to change photo</Text>
+                      </View>
+
+                      {/* Name Input */}
+                      <View style={{ marginBottom: 14 }}>
+                        <Text style={{ fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 6 }}>Name *</Text>
+                        <TextInput style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, fontSize: 13, color: '#111827' }} value={editedStaffName} onChangeText={setEditedStaffName} placeholder="Staff name" placeholderTextColor="#9CA3AF" />
+                      </View>
+
+                      {/* Role Dropdown */}
+                      <View style={{ marginBottom: 14 }}>
+                        <Text style={{ fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 6 }}>Role *</Text>
+                        <TouchableOpacity style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }} onPress={() => setShowEditStaffRoleOptions(!showEditStaffRoleOptions)}>
+                          <Text style={{ fontSize: 13, color: editedStaffRole ? '#111827' : '#9CA3AF' }}>{editedStaffRole || 'Select role'}</Text>
+                          <Ionicons name={showEditStaffRoleOptions ? 'chevron-up' : 'chevron-down'} size={18} color="#6B7280" />
+                        </TouchableOpacity>
+                        {showEditStaffRoleOptions && (
+                          <View style={{ borderWidth: 1, borderColor: '#D1D5DB', borderTopWidth: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, backgroundColor: '#fff' }}>
+                            {['Reception', 'Game Supervisor', 'Maintenance', 'Manager'].map((role) => (
+                              <TouchableOpacity key={role} style={{ padding: 10, borderBottomWidth: 1, borderBottomColor: '#E5E7EB' }} onPress={() => {
+                                setEditedStaffRole(role);
+                                setShowEditStaffRoleOptions(false);
+                              }}>
+                                <Text style={{ fontSize: 13, color: '#111827' }}>{role}</Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+
+                      {/* Shift Dropdown */}
+                      <View style={{ marginBottom: 14 }}>
+                        <Text style={{ fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 6 }}>Shift *</Text>
+                        <TouchableOpacity style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }} onPress={() => setShowEditStaffShiftOptions(!showEditStaffShiftOptions)}>
+                          <Text style={{ fontSize: 13, color: editedStaffShift ? '#111827' : '#9CA3AF' }}>{editedStaffShift || 'Select shift'}</Text>
+                          <Ionicons name={showEditStaffShiftOptions ? 'chevron-up' : 'chevron-down'} size={18} color="#6B7280" />
+                        </TouchableOpacity>
+                        {showEditStaffShiftOptions && (
+                          <View style={{ borderWidth: 1, borderColor: '#D1D5DB', borderTopWidth: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, backgroundColor: '#fff' }}>
+                            {['Morning (8AM-4PM)', 'Evening (4PM-12AM)', 'Night (12AM-8AM)', 'Flexible', 'Full-time'].map((shift) => (
+                              <TouchableOpacity key={shift} style={{ padding: 10, borderBottomWidth: 1, borderBottomColor: '#E5E7EB' }} onPress={() => {
+                                setEditedStaffShift(shift);
+                                setShowEditStaffShiftOptions(false);
+                              }}>
+                                <Text style={{ fontSize: 13, color: '#111827' }}>{shift}</Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+
+                      {/* Phone Input */}
+                      <View style={{ marginBottom: 14 }}>
+                        <Text style={{ fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 6 }}>Phone</Text>
+                        <TextInput style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, fontSize: 13, color: '#111827' }} value={editedStaffPhone} onChangeText={setEditedStaffPhone} placeholder="Phone number" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+                      </View>
+
+                      {/* Status Dropdown */}
+                      <View style={{ marginBottom: 14 }}>
+                        <Text style={{ fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 6 }}>Status</Text>
+                        <TouchableOpacity style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }} onPress={() => setShowEditStaffStatusOptions(!showEditStaffStatusOptions)}>
+                          <Text style={{ fontSize: 13, color: editedStaffStatus ? '#111827' : '#9CA3AF' }}>{editedStaffStatus || 'Select status'}</Text>
+                          <Ionicons name={showEditStaffStatusOptions ? 'chevron-up' : 'chevron-down'} size={18} color="#6B7280" />
+                        </TouchableOpacity>
+                        {showEditStaffStatusOptions && (
+                          <View style={{ borderWidth: 1, borderColor: '#D1D5DB', borderTopWidth: 0, borderBottomLeftRadius: 8, borderBottomRightRadius: 8, backgroundColor: '#fff' }}>
+                            {['On Duty', 'Off Duty', 'In Meeting', 'On Leave'].map((status) => (
+                              <TouchableOpacity key={status} style={{ padding: 10, borderBottomWidth: 1, borderBottomColor: '#E5E7EB' }} onPress={() => {
+                                setEditedStaffStatus(status);
+                                setShowEditStaffStatusOptions(false);
+                              }}>
+                                <Text style={{ fontSize: 13, color: '#111827' }}>{status}</Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+
+                      {/* Status Detail Input */}
+                      <View style={{ marginBottom: 20 }}>
+                        <Text style={{ fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 6 }}>Status Detail</Text>
+                        <TextInput style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, fontSize: 13, color: '#111827', minHeight: 60 }} value={editedStaffStatusDetail} onChangeText={setEditedStaffStatusDetail} placeholder="E.g., In meeting with admin" placeholderTextColor="#9CA3AF" multiline />
+                      </View>
+
+                      {/* Action Buttons - Edit Mode */}
+                      <View style={{ flexDirection: 'row', gap: 10 }}>
+                        <TouchableOpacity style={{ flex: 1, backgroundColor: '#E5E7EB', borderRadius: 8, padding: 10, alignItems: 'center' }} onPress={() => setIsEditingStaff(false)} disabled={saving}>
+                          <Text style={{ color: '#374151', fontWeight: '700', fontSize: 13 }}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={{ flex: 1, backgroundColor: saving ? '#9CA3AF' : '#15803D', borderRadius: 8, padding: 10, alignItems: 'center' }} onPress={saveEditedStaff} disabled={saving}>
+                          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>{saving ? 'Saving...' : 'Save'}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
+                  ) : (
+                    // VIEW MODE
+                    <>
+                      {/* Photo */}
+                      <View style={{ alignItems: 'center', marginBottom: 20 }}>
+                        <TouchableOpacity 
+                          onPress={() => {
+                            if (selectedStaff.photo) {
+                              setStaffPhotoViewerUri(selectedStaff.photo);
+                              setStaffPhotoViewerVisible(true);
+                            }
+                          }}
+                          activeOpacity={0.7}
+                        >
+                          {selectedStaff.photo ? (
+                            <Image source={{ uri: selectedStaff.photo }} style={{ width: 100, height: 100, borderRadius: 50, backgroundColor: '#E5E7EB' }} />
+                          ) : (
+                            <View style={{ width: 100, height: 100, borderRadius: 50, backgroundColor: '#F3F4F6', justifyContent: 'center', alignItems: 'center' }}>
+                              <Ionicons name="person" size={44} color="#D1D5DB" />
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                        <Text style={{ fontSize: 16, fontWeight: '700', marginTop: 12, color: '#111827' }}>{selectedStaff.name}</Text>
+                        <Text style={{ fontSize: 13, color: '#6B7280', marginTop: 3 }}>{selectedStaff.role}</Text>
+                      </View>
+
+                      {/* Status Row */}
+                      <View style={{ flexDirection: 'row', marginBottom: 14, gap: 10 }}>
+                        <View style={{ flex: 1, backgroundColor: selectedStaff.is_online ? '#D1FAE5' : '#FEE2E2', borderRadius: 8, padding: 12 }}>
+                          <Text style={{ fontSize: 11, color: selectedStaff.is_online ? '#065F46' : '#7F1D1D', fontWeight: '600' }}>Status</Text>
+                          <Text style={{ fontSize: 12, color: selectedStaff.is_online ? '#047857' : '#DC2626', fontWeight: '700', marginTop: 4 }}>
+                            {selectedStaff.is_online ? 'Online' : 'Offline'}
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1, backgroundColor: '#EFF6FF', borderRadius: 8, padding: 12 }}>
+                          <Text style={{ fontSize: 11, color: '#1E40AF', fontWeight: '600' }}>Shift</Text>
+                          <Text style={{ fontSize: 12, color: '#1D4ED8', fontWeight: '700', marginTop: 4 }}>{selectedStaff.shift}</Text>
+                        </View>
+                      </View>
+
+                      {/* Details Grid */}
+                      <View style={{ backgroundColor: '#F9FAFB', borderRadius: 8, padding: 12, marginBottom: 14 }}>
+                        <View style={{ marginBottom: 10 }}>
+                          <Text style={{ fontSize: 11, color: '#6B7280', fontWeight: '600' }}>Phone</Text>
+                          <TouchableOpacity onPress={() => selectedStaff?.phone && Linking.openURL(`tel:${selectedStaff.phone}`)}>
+                            <Text style={{ fontSize: 13, color: '#3B82F6', marginTop: 4, fontWeight: '500', textDecorationLine: 'underline' }}>{selectedStaff.phone}</Text>
+                          </TouchableOpacity>
+                        </View>
+                        <View style={{ marginBottom: 10 }}>
+                          <Text style={{ fontSize: 11, color: '#6B7280', fontWeight: '600' }}>Current Status</Text>
+                          <Text style={{ fontSize: 13, color: '#111827', marginTop: 4, fontWeight: '500' }}>{selectedStaff.status}</Text>
+                        </View>
+                        {selectedStaff.status_detail && (
+                          <View>
+                            <Text style={{ fontSize: 11, color: '#6B7280', fontWeight: '600' }}>Status Detail</Text>
+                            <Text style={{ fontSize: 13, color: '#111827', marginTop: 4, fontWeight: '500' }}>{selectedStaff.status_detail}</Text>
+                          </View>
+                        )}
+                      </View>
+
+                      {/* Timestamps */}
+                      <View style={{ backgroundColor: '#F3F4F6', borderRadius: 8, padding: 12, marginBottom: 14 }}>
+                        <View style={{ marginBottom: 6 }}>
+                          <Text style={{ fontSize: 11, color: '#9CA3AF', fontWeight: '500' }}>Added: {new Date(selectedStaff.created_at).toLocaleDateString()}</Text>
+                        </View>
+                        <Text style={{ fontSize: 11, color: '#9CA3AF', fontWeight: '500' }}>Updated: {new Date(selectedStaff.updated_at).toLocaleDateString()}</Text>
+                      </View>
+
+                      {/* Action Buttons - View Mode */}
+                      <View style={{ flexDirection: 'column', gap: 10 }}>
+                        <TouchableOpacity style={{ width: '100%', backgroundColor: '#3B82F6', borderRadius: 8, padding: 10, alignItems: 'center' }} onPress={() => enterEditMode(selectedStaff)}>
+                          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Edit Staff</Text>
+                        </TouchableOpacity>
+                        <View style={{ flexDirection: 'row', gap: 10 }}>
+                          <TouchableOpacity style={{ flex: 1, backgroundColor: '#E5E7EB', borderRadius: 8, padding: 10, alignItems: 'center' }} onPress={() => setStaffDetailModalVisible(false)}>
+                            <Text style={{ color: '#374151', fontWeight: '700', fontSize: 13 }}>Close</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={{ flex: 1, backgroundColor: '#EF4444', borderRadius: 8, padding: 10, alignItems: 'center' }} onPress={() => {
+                            Alert.alert(
+                              'Delete Staff',
+                              `Are you sure you want to remove ${selectedStaff.name}?`,
+                              [
+                                { text: 'Cancel', style: 'cancel' },
+                                { text: 'Delete', style: 'destructive', onPress: async () => {
+                                  try {
+                                    await deleteStaffMember(selectedStaff.id);
+                                    setStaffDetailModalVisible(false);
+                                    fetchStaff();
+                                  } catch (err) {
+                                    Alert.alert('Error', 'Failed to delete staff member.');
+                                  }
+                                }},
+                              ]
+                            );
+                          }}>
+                            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Delete</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </>
+                  )}
+                </>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Gallery Image Viewer Modal */}
+      <Modal visible={galleryViewerVisible} animationType="fade" transparent onRequestClose={() => setGalleryViewerVisible(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' }}>
+          {/* Close Button */}
+          <TouchableOpacity 
+            onPress={() => setGalleryViewerVisible(false)} 
+            style={{ position: 'absolute', top: 50, right: 20, zIndex: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20, padding: 8 }}
+          >
+            <Ionicons name="close" size={28} color="#fff" />
+          </TouchableOpacity>
+          
+          {/* Image Display */}
+          {galleryViewerIndex === -1 && coverImageUri ? (
+            <Image source={{ uri: coverImageUri }} style={{ width: '90%', height: '70%', borderRadius: 12 }} resizeMode="contain" />
+          ) : galleryImageUris[galleryViewerIndex] ? (
+            <Image source={{ uri: galleryImageUris[galleryViewerIndex] }} style={{ width: '90%', height: '70%', borderRadius: 12 }} resizeMode="contain" />
+          ) : null}
+
+          {/* Navigation for gallery images */}
+          {galleryViewerIndex >= 0 && galleryImageUris.length > 1 && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 24, marginTop: 20 }}>
+              <TouchableOpacity 
+                onPress={() => setGalleryViewerIndex((prev) => Math.max(0, prev - 1))}
+                style={{ backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 24, padding: 10 }}
+                disabled={galleryViewerIndex === 0}
+              >
+                <Ionicons name="chevron-back" size={24} color={galleryViewerIndex === 0 ? '#666' : '#fff'} />
+              </TouchableOpacity>
+              <Text style={{ color: '#fff', fontSize: 14, fontWeight: '600' }}>{galleryViewerIndex + 1} / {galleryImageUris.length}</Text>
+              <TouchableOpacity 
+                onPress={() => setGalleryViewerIndex((prev) => Math.min(galleryImageUris.length - 1, prev + 1))}
+                style={{ backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 24, padding: 10 }}
+                disabled={galleryViewerIndex === galleryImageUris.length - 1}
+              >
+                <Ionicons name="chevron-forward" size={24} color={galleryViewerIndex === galleryImageUris.length - 1 ? '#666' : '#fff'} />
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </Modal>
+
+      {/* Staff Photo Viewer Modal */}
+      <Modal visible={staffPhotoViewerVisible} animationType="fade" transparent onRequestClose={() => setStaffPhotoViewerVisible(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' }}>
+          {/* Close Button */}
+          <TouchableOpacity 
+            onPress={() => setStaffPhotoViewerVisible(false)} 
+            style={{ position: 'absolute', top: 50, right: 20, zIndex: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20, padding: 8 }}
+          >
+            <Ionicons name="close" size={28} color="#fff" />
+          </TouchableOpacity>
+          
+          {/* Image Display */}
+          {staffPhotoViewerUri && (
+            <Image source={{ uri: staffPhotoViewerUri }} style={{ width: '90%', height: '70%', borderRadius: 12 }} resizeMode="contain" />
+          )}
+        </View>
       </Modal>
     </SafeAreaView>
   );
@@ -1704,22 +2656,21 @@ const styles = StyleSheet.create({
   ampmBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: '#E5E7EB', backgroundColor: '#fff' },
   ampmText: { fontSize: 14, fontWeight: '700', color: '#111827' },
   /* Inline Time Picker Styles (within Edit Opening Hours Modal) */
-  inlinePickerContainer: { backgroundColor: '#F8FAFC', borderRadius: 8, padding: 12, marginVertical: 8, borderWidth: 1, borderColor: '#E5E7EB' },
-  inlinePickerLabel: { fontSize: 13, fontWeight: '600', color: '#374151', marginBottom: 10 },
-  inlinePickerRow: { flexDirection: 'row', gap: 12, marginBottom: 12 },
-  inlinePickerCol: { flex: 1 },
-  inlinePickerColLabel: { fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 6 },
-  inlinePickerBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#D1D5DB', backgroundColor: '#fff', marginRight: 6, alignItems: 'center', justifyContent: 'center' },
-  inlinePickerBtnActive: { backgroundColor: '#DCFCE7', borderColor: '#15803D' },
-  inlinePickerBtnText: { fontSize: 12, color: '#111827', fontWeight: '600' },
-  inlinePickerBtnTextActive: { color: '#15803D', fontWeight: '700' },
-  inlineAmpmBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#D1D5DB', backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
-  inlineAmpmBtnActive: { backgroundColor: '#DCFCE7', borderColor: '#15803D' },
-  inlineAmpmBtnText: { fontSize: 12, color: '#111827', fontWeight: '600' },
-  inlineAmpmBtnTextActive: { color: '#15803D', fontWeight: '700' },
-  inlinePickerCancelBtn: { borderWidth: 1, borderColor: '#D1D5DB', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, backgroundColor: '#fff' },
+  inlinePickerContainer: { backgroundColor: '#F8FAFC', borderRadius: 12, padding: 16, marginVertical: 8, borderWidth: 1, borderColor: '#E5E7EB' },
+  inlinePickerLabel: { fontSize: 14, fontWeight: '700', color: '#111827', marginBottom: 12 },
+  ampmToggleRow: { flexDirection: 'row', gap: 0, marginBottom: 14, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#D1D5DB' },
+  ampmToggleBtn: { flex: 1, paddingVertical: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff' },
+  ampmToggleBtnActive: { backgroundColor: '#15803D' },
+  ampmToggleBtnText: { fontSize: 14, fontWeight: '700', color: '#6B7280' },
+  ampmToggleBtnTextActive: { color: '#fff' },
+  hourGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  hourGridBtn: { width: '23%' as any, paddingVertical: 12, borderRadius: 8, borderWidth: 1, borderColor: '#E5E7EB', backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  hourGridBtnActive: { backgroundColor: '#DCFCE7', borderColor: '#15803D', borderWidth: 2 },
+  hourGridBtnText: { fontSize: 13, color: '#374151', fontWeight: '600' },
+  hourGridBtnTextActive: { color: '#15803D', fontWeight: '700' },
+  inlinePickerCancelBtn: { borderWidth: 1, borderColor: '#D1D5DB', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8, backgroundColor: '#fff' },
   inlinePickerCancelText: { color: '#6B7280', fontWeight: '600', fontSize: 13 },
-  inlinePickerSaveBtn: { backgroundColor: '#15803D', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6 },
+  inlinePickerSaveBtn: { backgroundColor: '#15803D', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8 },
   inlinePickerSaveText: { color: '#fff', fontWeight: '700', fontSize: 13 },
   /* Edit Complex Details Modal Styles */
   editComplexOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 12 },
@@ -1787,4 +2738,24 @@ const styles = StyleSheet.create({
   bookText: { color: '#fff', fontWeight: '700' },
   addSportBtn: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8, backgroundColor: '#15803D' },
   addSportText: { color: '#fff', fontWeight: '700' },
+  photoPickerBtn: {
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    borderStyle: 'dashed',
+    borderRadius: 10,
+    overflow: 'hidden',
+    marginBottom: 16,
+    backgroundColor: '#F9FAFB',
+  },
+  photoPickerPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 20,
+  },
+  photoPickerText: {
+    color: '#9CA3AF',
+    marginTop: 8,
+    fontSize: 14,
+    fontWeight: '500',
+  },
 });

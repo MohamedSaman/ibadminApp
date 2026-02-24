@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { getUnreadNotificationCount } from '@/services/indoorAdminApi';
 
 // Simple event emitter for notification count
 type Listener = (count: number) => void;
 const listeners: Set<Listener> = new Set();
-let currentCount = 2;
+let currentCount = 0;
 
 export const notificationEvents = {
   setCount: (count: number) => {
@@ -17,20 +18,38 @@ export const notificationEvents = {
   }
 };
 
+const POLL_INTERVAL = 30_000; // 30 seconds
+
 export function useNotificationCount() {
   const [count, setCount] = useState(currentCount);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchCount = useCallback(async () => {
+    try {
+      const unread = await getUnreadNotificationCount();
+      notificationEvents.setCount(unread);
+    } catch {
+      // Silently ignore — user may not be logged in yet
+    }
+  }, []);
 
   useEffect(() => {
-    // Subscribe to count changes
+    // Subscribe to count changes from other components
     const unsubscribe = notificationEvents.subscribe((newCount) => {
       setCount(newCount);
     });
 
-    // Get initial count
-    setCount(notificationEvents.getCount());
+    // Initial fetch
+    fetchCount();
 
-    return unsubscribe;
-  }, []);
+    // Poll periodically
+    intervalRef.current = setInterval(fetchCount, POLL_INTERVAL);
+
+    return () => {
+      unsubscribe();
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [fetchCount]);
 
   const updateCount = useCallback((newCount: number) => {
     notificationEvents.setCount(newCount);
@@ -38,3 +57,4 @@ export function useNotificationCount() {
 
   return { count, updateCount };
 }
+

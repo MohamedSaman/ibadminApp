@@ -267,11 +267,11 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   slotButton: {
-    paddingHorizontal: 10,
-    paddingVertical: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
     borderRadius: 8,
     alignItems: 'center',
-    width: '31%',
+    width: '30%',
     marginBottom: 8,
   },
   availableSlot: {
@@ -285,7 +285,7 @@ const styles = StyleSheet.create({
     borderColor: '#D1D5DB',
   },
   slotTime: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
   },
   slotStatus: {

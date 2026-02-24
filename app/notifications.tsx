@@ -2,186 +2,223 @@ import { ThemedText } from '@/components/themed-text';
 import { useNotificationCount } from '@/hooks/useNotificationCount';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
-import React, { useState } from 'react';
-import { FlatList, SafeAreaView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  RefreshControl,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import {
+  getAdminNotifications,
+  markNotificationRead,
+  markAllNotificationsRead,
+  deleteNotification as apiDeleteNotification,
+} from '@/services/indoorAdminApi';
+import { AdminNotification, AdminNotificationType } from '@/types/api';
 
-interface Notification {
-  id: string;
-  type: 'booking' | 'payment' | 'cancellation' | 'reminder' | 'system';
-  title: string;
-  description: string;
-  timestamp: string;
-  isRead: boolean;
-  icon: string;
-  color: string;
-  bookingDetails?: {
-    sport: string;
-    court: string;
-    date: string;
-    time: string;
-    customer: string;
-    status: string;
-    isPaid: boolean;
+// ─── Helpers ──────────────────────────────────────────────
+function getTypeLabel(type: AdminNotificationType): string {
+  const map: Record<AdminNotificationType, string> = {
+    new_booking: 'New Booking',
+    booking_confirmed: 'Confirmed',
+    booking_cancelled: 'Cancelled',
+    booking_completed: 'Completed',
+    booking_updated: 'Updated',
+    password_changed: 'Security',
+    system: 'System',
   };
+  return map[type] || 'Notification';
 }
 
-const mockNotifications: Notification[] = [
-  {
-    id: '1',
-    type: 'booking',
-    title: 'New Booking Confirmed',
-    description: 'Football slot booked for today at 6:00 PM',
-    timestamp: '5 minutes ago',
-    isRead: false,
-    icon: 'checkmark-circle',
-    color: '#10B981',
-    bookingDetails: {
-      sport: 'Football',
-      court: 'Court 1',
-      date: 'January 27, 2026',
-      time: '6:00 PM',
-      customer: 'Ahmed Al-Mansouri',
-      status: 'Confirmed',
-      isPaid: true,
-    },
-  },
-  {
-    id: '2',
-    type: 'payment',
-    title: 'Payment Received',
-    description: 'Payment of AED 100 received for Pool booking',
-    timestamp: '2 hours ago',
-    isRead: false,
-    icon: 'cash',
-    color: '#059669',
-    bookingDetails: {
-      sport: 'Pools',
-      court: 'Pool Lane 2',
-      date: 'January 27, 2026',
-      time: '2:00 PM',
-      customer: 'Fatima Al-Kaabi',
-      status: 'Paid',
-      isPaid: true,
-    },
-  },
-  {
-    id: '3',
-    type: 'reminder',
-    title: 'Upcoming Booking Reminder',
-    description: 'Reminder: Football booking in 1 hour',
-    timestamp: '1 hour ago',
-    isRead: true,
-    icon: 'notifications',
-    color: '#0EA5E9',
-    bookingDetails: {
-      sport: 'Football',
-      court: 'Court 2',
-      date: 'January 27, 2026',
-      time: '7:00 PM',
-      customer: 'Ali Hassan',
-      status: 'Pending',
-      isPaid: false,
-    },
-  },
-  {
-    id: '4',
-    type: 'cancellation',
-    title: 'Booking Cancelled',
-    description: 'Pool booking for tomorrow cancelled by customer',
-    timestamp: '3 hours ago',
-    isRead: true,
-    icon: 'close-circle',
-    color: '#EF4444',
-  },
-  {
-    id: '5',
-    type: 'system',
-    title: 'System Update',
-    description: 'New booking features are now available',
-    timestamp: '1 day ago',
-    isRead: true,
-    icon: 'information-circle',
-    color: '#8B5CF6',
-  },
-];
+function getTypeColor(type: AdminNotificationType): string {
+  const map: Record<AdminNotificationType, string> = {
+    new_booking: '#10B981',
+    booking_confirmed: '#0EA5E9',
+    booking_cancelled: '#EF4444',
+    booking_completed: '#8B5CF6',
+    booking_updated: '#F59E0B',
+    password_changed: '#F97316',
+    system: '#6366F1',
+  };
+  return map[type] || '#6B7280';
+}
 
+function timeAgo(dateString: string): string {
+  const now = new Date();
+  const date = new Date(dateString);
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHrs = Math.floor(diffMins / 60);
+  if (diffHrs < 24) return `${diffHrs}h ago`;
+  const diffDays = Math.floor(diffHrs / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString();
+}
+
+// ─── Component ────────────────────────────────────────────
 export default function NotificationsScreen() {
   const router = useRouter();
-  const [notifications, setNotifications] = useState<Notification[]>(mockNotifications);
-  const [selectedNotification, setSelectedNotification] = useState<Notification | null>(null);
-  const [detailsModalVisible, setDetailsModalVisible] = useState(false);
   const { updateCount } = useNotificationCount();
 
-  const markAsRead = (id: string) => {
-    const updatedNotifications = notifications.map((notif) =>
-      notif.id === id ? { ...notif, isRead: true } : notif
-    );
-    setNotifications(updatedNotifications);
-    
-    // Update global notification count immediately
-    const unreadCount = updatedNotifications.filter((n) => !n.isRead).length;
-    updateCount(unreadCount);
-  };
+  const [notifications, setNotifications] = useState<AdminNotification[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [selectedNotification, setSelectedNotification] = useState<AdminNotification | null>(null);
+  const [detailsModalVisible, setDetailsModalVisible] = useState(false);
 
-  const handleNotificationPress = (notification: Notification) => {
-    markAsRead(notification.id);
-    if (notification.bookingDetails) {
-      setSelectedNotification(notification);
-      setDetailsModalVisible(true);
-    }
-  };
+  const PAGE_SIZE = 20;
 
-  const deleteNotification = (id: string) => {
-    setNotifications(notifications.filter((notif) => notif.id !== id));
-  };
+  // ─── Fetch ───────────────────────────────────────────
+  const fetchNotifications = useCallback(
+    async (pageNum: number = 1, append: boolean = false) => {
+      try {
+        const res = await getAdminNotifications(pageNum, PAGE_SIZE);
+        if (append) {
+          setNotifications((prev) => [...prev, ...res.results]);
+        } else {
+          setNotifications(res.results);
+        }
+        setTotalCount(res.count);
+        setPage(pageNum);
 
-  const getTypeLabel = (type: string) => {
-    switch (type) {
-      case 'booking':
-        return 'Booking';
-      case 'payment':
-        return 'Payment';
-      case 'cancellation':
-        return 'Cancellation';
-      case 'reminder':
-        return 'Reminder';
-      case 'system':
-        return 'System';
-      default:
-        return 'Notification';
-    }
-  };
-
-  const unreadCount = notifications.filter((n) => !n.isRead).length;
-
-  const renderNotificationItem = ({ item }: { item: Notification }) => (
-    <TouchableOpacity
-      style={[styles.notificationCard, !item.isRead && styles.notificationCardUnread]}
-      onPress={() => handleNotificationPress(item)}
-    >
-      <View style={styles.notificationContent}>
-        <View style={styles.notificationHeader}>
-          <ThemedText style={styles.notificationTitle}>{item.title}</ThemedText>
-          {!item.isRead && <View style={styles.unreadDot} />}
-        </View>
-        <ThemedText style={styles.notificationDescription}>{item.description}</ThemedText>
-        <View style={styles.notificationFooter}>
-          <ThemedText style={styles.notificationTime}>{item.timestamp}</ThemedText>
-          <View style={styles.notificationBadge}>
-            <Text style={styles.notificationBadgeText}>{getTypeLabel(item.type)}</Text>
-          </View>
-        </View>
-      </View>
-
-      <TouchableOpacity
-        style={styles.deleteBtn}
-        onPress={() => deleteNotification(item.id)}
-      >
-        <Ionicons name="trash-outline" size={20} color="#EF4444" />
-      </TouchableOpacity>
-    </TouchableOpacity>
+        // Update global badge count
+        const unread = append
+          ? [...notifications, ...res.results].filter((n) => !n.is_read).length
+          : res.results.filter((n) => !n.is_read).length;
+        updateCount(unread);
+      } catch (err) {
+        console.error('Failed to fetch notifications:', err);
+      }
+    },
+    [],
   );
 
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      await fetchNotifications(1);
+      setLoading(false);
+    })();
+  }, []);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchNotifications(1);
+    setRefreshing(false);
+  };
+
+  const onLoadMore = async () => {
+    if (loadingMore || notifications.length >= totalCount) return;
+    setLoadingMore(true);
+    await fetchNotifications(page + 1, true);
+    setLoadingMore(false);
+  };
+
+  // ─── Actions ─────────────────────────────────────────
+  const handleMarkAsRead = async (id: number) => {
+    try {
+      await markNotificationRead(id);
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, is_read: true } : n)),
+      );
+      const newUnread = notifications.filter((n) => !n.is_read && n.id !== id).length;
+      updateCount(newUnread);
+    } catch (err) {
+      console.error('Failed to mark as read:', err);
+    }
+  };
+
+  const handleMarkAllRead = async () => {
+    try {
+      await markAllNotificationsRead();
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+      updateCount(0);
+    } catch (err) {
+      console.error('Failed to mark all as read:', err);
+    }
+  };
+
+  const handleDelete = (id: number) => {
+    Alert.alert('Delete Notification', 'Are you sure you want to delete this notification?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await apiDeleteNotification(id);
+            const updated = notifications.filter((n) => n.id !== id);
+            setNotifications(updated);
+            updateCount(updated.filter((n) => !n.is_read).length);
+            if (selectedNotification?.id === id) {
+              setDetailsModalVisible(false);
+              setSelectedNotification(null);
+            }
+          } catch (err) {
+            console.error('Failed to delete notification:', err);
+          }
+        },
+      },
+    ]);
+  };
+
+  const handleNotificationPress = (notification: AdminNotification) => {
+    if (!notification.is_read) {
+      handleMarkAsRead(notification.id);
+    }
+    setSelectedNotification(notification);
+    setDetailsModalVisible(true);
+  };
+
+  // ─── Counts ──────────────────────────────────────────
+  const unreadCount = notifications.filter((n) => !n.is_read).length;
+
+  // ─── Render Item ─────────────────────────────────────
+  const renderNotificationItem = ({ item }: { item: AdminNotification }) => {
+    const color = getTypeColor(item.type);
+
+    return (
+      <TouchableOpacity
+        style={[styles.notificationCard, !item.is_read && styles.notificationCardUnread]}
+        onPress={() => handleNotificationPress(item)}
+      >
+        <View style={styles.notificationContent}>
+          <View style={styles.notificationHeader}>
+            <ThemedText style={styles.notificationTitle}>{item.title}</ThemedText>
+            {!item.is_read && <View style={styles.unreadDot} />}
+          </View>
+          <ThemedText style={styles.notificationDescription} numberOfLines={2}>
+            {item.message}
+          </ThemedText>
+          <View style={styles.notificationFooter}>
+            <ThemedText style={styles.notificationTime}>{timeAgo(item.created_at)}</ThemedText>
+            <View style={[styles.notificationBadge, { backgroundColor: color + '18' }]}>
+              <Text style={[styles.notificationBadgeText, { color }]}>
+                {getTypeLabel(item.type)}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        <TouchableOpacity style={styles.deleteBtn} onPress={() => handleDelete(item.id)}>
+          <Ionicons name="trash-outline" size={20} color="#EF4444" />
+        </TouchableOpacity>
+      </TouchableOpacity>
+    );
+  };
+
+  // ─── Render ──────────────────────────────────────────
   return (
     <>
       <Stack.Screen options={{ headerShown: false }} />
@@ -190,82 +227,131 @@ export default function NotificationsScreen() {
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.back()}>
             <Ionicons name="chevron-back" size={28} color="#000" />
-        </TouchableOpacity>
-        <View style={styles.headerTitleContainer}>
-          <ThemedText style={styles.headerTitle}>Notifications</ThemedText>
-          {unreadCount > 0 && (
-            <View style={styles.unreadBadge}>
-              <Text style={styles.unreadBadgeText}>{unreadCount}</Text>
-            </View>
+          </TouchableOpacity>
+          <View style={styles.headerTitleContainer}>
+            <ThemedText style={styles.headerTitle}>Notifications</ThemedText>
+            {unreadCount > 0 && (
+              <View style={styles.unreadBadge}>
+                <Text style={styles.unreadBadgeText}>{unreadCount}</Text>
+              </View>
+            )}
+          </View>
+          {unreadCount > 0 ? (
+            <TouchableOpacity onPress={handleMarkAllRead}>
+              <Ionicons name="checkmark-done" size={24} color="#0EA5E9" />
+            </TouchableOpacity>
+          ) : (
+            <View style={{ width: 28 }} />
           )}
         </View>
-        <View style={{ width: 28 }} />
-      </View>
 
-      {notifications.length > 0 ? (
-        <FlatList
-          data={notifications}
-          renderItem={renderNotificationItem}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.listContainer}
-          scrollEnabled={true}
-        />
-      ) : (
-        <View style={styles.emptyContainer}>
-          <Ionicons name="notifications-off" size={64} color="#D1D5DB" />
-          <ThemedText style={styles.emptyText}>No notifications</ThemedText>
-          <ThemedText style={styles.emptySubText}>You're all caught up!</ThemedText>
-        </View>
-      )}
-
-      {/* Notification Details Bubble Message */}
-      {detailsModalVisible && selectedNotification && (
-        <View style={styles.messageContainer}>
-          <TouchableOpacity
-            style={styles.messageOverlay}
-            onPress={() => setDetailsModalVisible(false)}
-          />
-          <View style={[styles.messageBubble, { borderLeftColor: selectedNotification.color }]}>
-            <View style={styles.messageBubbleHeader}>
-              <ThemedText style={styles.messageBubbleTitle}>{selectedNotification.title}</ThemedText>
-              <TouchableOpacity onPress={() => setDetailsModalVisible(false)}>
-                <Ionicons name="close" size={20} color="#6B7280" />
-              </TouchableOpacity>
-            </View>
-
-            <ThemedText style={styles.messageBubbleText}>{selectedNotification.description}</ThemedText>
-
-            {selectedNotification.bookingDetails && (
-              <>
-                <View style={styles.messageDivider} />
-                <ThemedText style={styles.messageDetailLabel}>Booking Details:</ThemedText>
-                <ThemedText style={styles.messageDetailText}>
-                  • {selectedNotification.bookingDetails.sport} - {selectedNotification.bookingDetails.court}
-                </ThemedText>
-                <ThemedText style={styles.messageDetailText}>
-                  • {selectedNotification.bookingDetails.date} at {selectedNotification.bookingDetails.time}
-                </ThemedText>
-                <ThemedText style={styles.messageDetailText}>
-                  • Customer: {selectedNotification.bookingDetails.customer}
-                </ThemedText>
-                <ThemedText style={styles.messageDetailText}>
-                  • Status: {selectedNotification.bookingDetails.status}
-                </ThemedText>
-                <ThemedText style={[styles.messageDetailText, { color: selectedNotification.bookingDetails.isPaid ? '#10B981' : '#EF4444' }]}>
-                  • Payment: {selectedNotification.bookingDetails.isPaid ? 'Paid' : 'Unpaid'}
-                </ThemedText>
-              </>
-            )}
-
-            <ThemedText style={styles.messageTime}>{selectedNotification.timestamp}</ThemedText>
+        {loading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#0EA5E9" />
+            <ThemedText style={styles.loadingText}>Loading notifications…</ThemedText>
           </View>
-        </View>
-      )}
+        ) : notifications.length > 0 ? (
+          <FlatList
+            data={notifications}
+            renderItem={renderNotificationItem}
+            keyExtractor={(item) => item.id.toString()}
+            contentContainerStyle={styles.listContainer}
+            refreshControl={
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#0EA5E9']} />
+            }
+            onEndReached={onLoadMore}
+            onEndReachedThreshold={0.3}
+            ListFooterComponent={
+              loadingMore ? (
+                <ActivityIndicator style={{ paddingVertical: 16 }} color="#0EA5E9" />
+              ) : null
+            }
+          />
+        ) : (
+          <View style={styles.emptyContainer}>
+            <Ionicons name="notifications-off" size={64} color="#D1D5DB" />
+            <ThemedText style={styles.emptyText}>No notifications</ThemedText>
+            <ThemedText style={styles.emptySubText}>You're all caught up!</ThemedText>
+          </View>
+        )}
+
+        {/* Detail Popup */}
+        {detailsModalVisible && selectedNotification && (
+          <View style={styles.messageContainer}>
+            <TouchableOpacity
+              style={styles.messageOverlay}
+              onPress={() => setDetailsModalVisible(false)}
+            />
+            <View
+              style={[
+                styles.messageBubble,
+                { borderLeftColor: getTypeColor(selectedNotification.type) },
+              ]}
+            >
+              <View style={styles.messageBubbleHeader}>
+                <ThemedText style={styles.messageBubbleTitle}>
+                  {selectedNotification.title}
+                </ThemedText>
+                <TouchableOpacity onPress={() => setDetailsModalVisible(false)}>
+                  <Ionicons name="close" size={20} color="#6B7280" />
+                </TouchableOpacity>
+              </View>
+
+              <ThemedText style={styles.messageBubbleText}>
+                {selectedNotification.message}
+              </ThemedText>
+
+              {/* Booking Details from data JSON */}
+              {selectedNotification.data && selectedNotification.data.booking_id && (
+                <>
+                  <View style={styles.messageDivider} />
+                  <ThemedText style={styles.messageDetailLabel}>Booking Details:</ThemedText>
+                  {selectedNotification.data.game_name && (
+                    <ThemedText style={styles.messageDetailText}>
+                      • Sport: {selectedNotification.data.game_name}
+                    </ThemedText>
+                  )}
+                  {selectedNotification.data.court_number && (
+                    <ThemedText style={styles.messageDetailText}>
+                      • Court: {selectedNotification.data.court_number}
+                    </ThemedText>
+                  )}
+                  {selectedNotification.data.booking_date && (
+                    <ThemedText style={styles.messageDetailText}>
+                      • Date: {selectedNotification.data.booking_date}
+                    </ThemedText>
+                  )}
+                  {selectedNotification.data.start_time && (
+                    <ThemedText style={styles.messageDetailText}>
+                      • Time: {selectedNotification.data.start_time} -{' '}
+                      {selectedNotification.data.end_time}
+                    </ThemedText>
+                  )}
+                  {selectedNotification.data.user_name && (
+                    <ThemedText style={styles.messageDetailText}>
+                      • Customer: {selectedNotification.data.user_name}
+                    </ThemedText>
+                  )}
+                  {selectedNotification.data.price && (
+                    <ThemedText style={styles.messageDetailText}>
+                      • Price: Rs {selectedNotification.data.price}
+                    </ThemedText>
+                  )}
+                </>
+              )}
+
+              <ThemedText style={styles.messageTime}>
+                {timeAgo(selectedNotification.created_at)}
+              </ThemedText>
+            </View>
+          </View>
+        )}
       </SafeAreaView>
     </>
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
@@ -300,6 +386,16 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 12,
     fontWeight: '700',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    marginTop: 12,
+    color: '#6B7280',
+    fontSize: 14,
   },
   listContainer: {
     paddingHorizontal: 12,
@@ -357,7 +453,6 @@ const styles = StyleSheet.create({
     color: '#9CA3AF',
   },
   notificationBadge: {
-    backgroundColor: '#E5E7EB',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
@@ -365,7 +460,6 @@ const styles = StyleSheet.create({
   notificationBadgeText: {
     fontSize: 10,
     fontWeight: '600',
-    color: '#6B7280',
   },
   deleteBtn: {
     padding: 8,
@@ -387,11 +481,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#6B7280',
     marginTop: 8,
-  },
-  detailsOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.3)',
-    justifyContent: 'flex-end',
   },
   messageContainer: {
     position: 'absolute',
@@ -459,59 +548,5 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#9CA3AF',
     marginTop: 10,
-  },
-  detailsHeader: {
-    backgroundColor: '#15803D',
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  detailsTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '700',
-  },
-  detailsCloseBtn: {
-    padding: 8,
-  },
-  detailsContent: {
-    padding: 20,
-  },
-  simpleRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-  },
-  simpleLabel: {
-    fontSize: 14,
-    color: '#6B7280',
-    fontWeight: '500',
-  },
-  simpleValue: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#111827',
-  },
-  detailsFooter: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB',
-  },
-  closeButton: {
-    backgroundColor: '#15803D',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  closeButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
   },
 });

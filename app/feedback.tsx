@@ -1,29 +1,43 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React from 'react';
-import { Image, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-
-const reviews = [
-  {
-    id: 'r1',
-    name: 'Mohammed Akmal',
-    date: '01-01-2026',
-    place: "Kanzul sport's complex",
-    rating: 5,
-    text: 'Ybnycv',
-  },
-  {
-    id: 'r2',
-    name: 'MAM NZN',
-    date: '31-12-2025',
-    place: "Kanzul sport's complex",
-    rating: 5,
-    text: 'Good',
-  },
-];
+import React, { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, Image, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { getVenueReviews } from '@/services/indoorAdminApi';
 
 export default function FeedbackScreen() {
   const router = useRouter();
+  const [reviews, setReviews] = useState<any[]>([]);
+  const [averageRating, setAverageRating] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const fetchReviews = useCallback(async (showRefresh = false) => {
+    try {
+      if (showRefresh) setRefreshing(true);
+      else setLoading(true);
+      const data = await getVenueReviews();
+      const reviewsList = data.results || [];
+      setReviews(reviewsList);
+      setAverageRating(data.average_rating || 0);
+    } catch (err) {
+      console.error('Failed to fetch reviews:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchReviews();
+  }, [fetchReviews]);
+
+  const formatDate = (dateStr: string) => {
+    try {
+      return new Date(dateStr).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    } catch {
+      return dateStr;
+    }
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -39,41 +53,57 @@ export default function FeedbackScreen() {
         <Text style={styles.topMonth}>January 2026</Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.container}>
+      <ScrollView contentContainerStyle={styles.container} refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={() => fetchReviews(true)} colors={['#15803D']} />
+      }>
         <View style={styles.summaryCard}>
           <View style={styles.summaryItem}>
-            <Text style={styles.summaryValue}>2</Text>
+            <Text style={styles.summaryValue}>{reviews.length}</Text>
             <Text style={styles.summaryLabel}>Total Reviews</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.summaryItem}>
             <View style={styles.ratingRow}>
-              <Text style={styles.summaryValue}>5.0</Text>
-              <Text style={[styles.stars, styles.starsSpacing]}>★★★★★</Text>
+              <Text style={styles.summaryValue}>{averageRating.toFixed(1)}</Text>
+              <Text style={[styles.stars, styles.starsSpacing]}>{'★'.repeat(Math.round(averageRating))}{'☆'.repeat(5 - Math.round(averageRating))}</Text>
             </View>
             <Text style={styles.summaryLabel}>Average Rating</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.summaryItem}>
-            <Text style={styles.summaryValue}>2.0k</Text>
-            <Text style={styles.summaryLabel}>Growth in Reviews</Text>
+            <Text style={styles.summaryValue}>{reviews.length}</Text>
+            <Text style={styles.summaryLabel}>This Period</Text>
           </View>
         </View>
 
-        {reviews.map((r) => (
+        {loading && (
+          <View style={{ alignItems: 'center', padding: 40 }}>
+            <ActivityIndicator size="large" color="#15803D" />
+            <Text style={{ marginTop: 12, color: '#6B7280' }}>Loading reviews...</Text>
+          </View>
+        )}
+
+        {!loading && reviews.length === 0 && (
+          <View style={{ alignItems: 'center', padding: 40 }}>
+            <Ionicons name="chatbubble-ellipses-outline" size={48} color="#D1D5DB" />
+            <Text style={{ marginTop: 12, color: '#6B7280' }}>No reviews yet</Text>
+          </View>
+        )}
+
+        {!loading && reviews.map((r: any) => (
           <View key={r.id} style={styles.reviewCard}>
             <View style={styles.reviewHeader}>
               <Image source={{ uri: 'https://reactnative.dev/img/tiny_logo.png' }} style={styles.avatar} />
               <View style={{ flex: 1, marginLeft: 12 }}>
                 <View style={styles.nameRow}>
-                  <Text style={styles.reviewerName}>{r.name}</Text>
-                  <Text style={styles.ratingText}>{' '}{'★'.repeat(r.rating)}</Text>
+                  <Text style={styles.reviewerName}>{r.user_name || 'Anonymous'}</Text>
+                  <Text style={styles.ratingText}>{' '}{'★'.repeat(r.rating || 0)}</Text>
                 </View>
-                <Text style={styles.reviewMeta}>{r.date} on {r.place}</Text>
+                <Text style={styles.reviewMeta}>{formatDate(r.created_at)} {r.user_email ? `by ${r.user_email}` : ''}</Text>
               </View>
             </View>
 
-            <Text style={styles.reviewText}>{r.text}</Text>
+            <Text style={styles.reviewText}>{r.comment || 'No comment'}</Text>
 
             <View style={styles.actionsRow}>
               <TouchableOpacity style={styles.actionBtn}>

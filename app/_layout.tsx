@@ -2,6 +2,8 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
+import { useEffect } from 'react';
+import { initApi } from '@/services/apiClient';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
@@ -11,6 +13,17 @@ export const unstable_settings = {
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
+
+  useEffect(() => {
+    // Probe and set API baseURL on app startup (non-blocking)
+    (async () => {
+      try {
+        await initApi();
+      } catch (e) {
+        console.log('[RootLayout] initApi error', e);
+      }
+    })();
+  }, []);
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>

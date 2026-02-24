@@ -1,8 +1,9 @@
 import { useNotificationCount } from '@/hooks/useNotificationCount';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React, { useMemo, useState } from 'react';
-import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
@@ -13,6 +14,33 @@ import {
     UpcomingBookings,
 } from '@/components/dashboard';
 import SideMenu from '@/components/SideMenu';
+import { getDashboardStats, getUpcomingBookings, getSports, getSlotAvailability, logout } from '@/services/indoorAdminApi';
+import { DashboardStats, Booking, Sport, SlotAvailabilityResponse } from '@/types/api';
+
+// Define preferred sport order (early registered sports first)
+const SPORT_ORDER_PRIORITY: Record<string, number> = {
+  'football': 1,
+  'soccer': 98,
+  'cricket': 2,
+  'pool': 3,
+  'swimming': 3,
+  'basketball': 4,
+  'badminton': 5,
+  'tennis': 6,
+  'gym': 98,
+};
+
+// Helper function to get sort priority for a sport
+const getSportPriority = (sportName: string): number => {
+  const name = sportName.toLowerCase().trim();
+  for (const [key, priority] of Object.entries(SPORT_ORDER_PRIORITY)) {
+    if (name.includes(key)) {
+      return priority;
+    }
+  }
+  // Default: put unknown sports at the end, sorted alphabetically
+  return 100;
+};
 
 // Base mock data for sports
 const baseSportData = [
@@ -136,6 +164,90 @@ const getSportDataForDate = (date: Date) => {
   }));
 };
 
+// Helper functions for API data transformation
+const getSportIcon = (sportName: string): 'football' | 'water' | 'radio-button-on' | 'basketball' | 'tennisball' | 'fitness' => {
+  const name = sportName.toLowerCase();
+  if (name.includes('football') || name.includes('soccer')) return 'football';
+  if (name.includes('pool') || name.includes('swim')) return 'water';
+  if (name.includes('cricket')) return 'radio-button-on';
+  if (name.includes('basket')) return 'basketball';
+  if (name.includes('tennis') || name.includes('badminton')) return 'tennisball';
+  return 'fitness';
+};
+
+const getSportColor = (sportName: string): string => {
+  const name = sportName.toLowerCase();
+  if (name.includes('football') || name.includes('soccer')) return '#16A34A';
+  if (name.includes('pool') || name.includes('swim')) return '#0EA5E9';
+  if (name.includes('cricket')) return '#DC2626';
+  if (name.includes('basket')) return '#F97316';
+  if (name.includes('tennis') || name.includes('badminton')) return '#8B5CF6';
+  return '#6366F1';
+};
+
+const generateSlotsForSport = (sport: Sport, date: Date) => {
+  const dayOfWeek = date.getDay();
+  const baseSlots = [
+    { time: '10:00 AM', status: 'available' as const },
+    { time: '11:00 AM', status: 'available' as const },
+    { time: '12:00 PM', status: 'available' as const },
+    { time: '01:00 PM', status: 'available' as const },
+    { time: '02:00 PM', status: 'available' as const },
+    { time: '03:00 PM', status: 'available' as const },
+    { time: '04:00 PM', status: 'available' as const },
+    { time: '05:00 PM', status: 'available' as const },
+    { time: '06:00 PM', status: 'available' as const },
+    { time: '07:00 PM', status: 'available' as const },
+    { time: '08:00 PM', status: 'available' as const },
+    { time: '09:00 PM', status: 'available' as const },
+    { time: '10:00 PM', status: 'available' as const },
+  ];
+
+  return baseSlots.map((slot, idx) => {
+    if (isSlotTimePast(slot.time, date)) {
+      return { ...slot, status: 'past' as const };
+    }
+    // Vary availability based on day of week
+    let status = slot.status;
+    if (dayOfWeek === 1 && idx % 3 === 0) status = 'booked';
+    if (dayOfWeek === 2 && idx % 4 === 0) status = 'booked';
+    if (dayOfWeek === 3 && (idx === 2 || idx === 5 || idx === 8)) status = 'booked';
+    if (dayOfWeek === 4 && idx % 2 === 0) status = 'booked';
+    if (dayOfWeek === 5 && idx === 1) status = 'booked';
+    if (dayOfWeek === 6 && idx % 5 === 0) status = 'booked';
+    return { ...slot, status };
+  });
+};
+
+const formatTime = (timeStr: string): string => {
+  if (!timeStr) return 'N/A';
+  try {
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    const period = hours >= 12 ? 'PM' : 'AM';
+    const hour12 = hours % 12 || 12;
+    return `${hour12}:${minutes.toString().padStart(2, '0')} ${period}`;
+  } catch {
+    return timeStr;
+  }
+};
+
+const formatBookingDate = (dateStr: string): string => {
+  if (!dateStr) return 'N/A';
+  try {
+    const date = new Date(dateStr);
+    const today = new Date();
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    
+    if (date.toDateString() === today.toDateString()) return 'Today';
+    if (date.toDateString() === tomorrow.toDateString()) return 'Tomorrow';
+    
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  } catch {
+    return dateStr;
+  }
+};
+
 const mockUpcomingBookings = [
   {
     id: '1',
@@ -162,6 +274,146 @@ export default function HomeScreen() {
   const [description, setDescription] = useState('');
   const [advancePayment, setAdvancePayment] = useState(false);
   const { count: notificationCount } = useNotificationCount();
+
+  // API data state
+  const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
+  const [upcomingBookings, setUpcomingBookings] = useState<Booking[]>([]);
+  const [sports, setSports] = useState<Sport[]>([]);
+  const [slotAvailabilityMap, setSlotAvailabilityMap] = useState<Record<string, SlotAvailabilityResponse>>({});
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const initialLoadDone = useRef(false);
+
+  // Fetch dashboard data from API
+  const fetchDashboardData = useCallback(async (showRefresh = false) => {
+    try {
+      if (showRefresh) setRefreshing(true);
+      else if (!initialLoadDone.current) setLoading(true);
+      setError(null);
+
+      const [statsData, bookingsData, sportsData] = await Promise.all([
+        getDashboardStats().catch(() => null),
+        getUpcomingBookings().catch(() => []),
+        getSports().catch(() => []),
+      ]);
+
+      if (statsData) setDashboardStats(statsData);
+      setUpcomingBookings(bookingsData);
+      setSports(sportsData);
+
+      // Fetch real slot availability for every sport
+      if (sportsData.length > 0) {
+        // Use local timezone date, NOT UTC (toISOString converts to UTC which can shift the day)
+        const year = selectedDate.getFullYear();
+        const month = String(selectedDate.getMonth() + 1).padStart(2, '0');
+        const day = String(selectedDate.getDate()).padStart(2, '0');
+        const dateStr = `${year}-${month}-${day}`;
+        const slotResults: Record<string, SlotAvailabilityResponse> = {};
+        await Promise.all(
+          sportsData.map(async (sport: Sport) => {
+            try {
+              const data = await getSlotAvailability({ sport_id: sport.id, date: dateStr });
+              slotResults[sport.id.toString()] = data;
+            } catch (err) {
+              console.error(`Failed to fetch slots for ${sport.name}:`, err);
+            }
+          }),
+        );
+        setSlotAvailabilityMap(slotResults);
+      }
+    } catch (err: any) {
+      console.error('Failed to fetch dashboard data:', err);
+      setError('Failed to load dashboard data');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+      initialLoadDone.current = true;
+    }
+  }, [selectedDate]);
+
+  useEffect(() => {
+    fetchDashboardData();
+  }, [fetchDashboardData]);
+
+  const onRefresh = useCallback(() => {
+    fetchDashboardData(true);
+  }, [fetchDashboardData]);
+
+  // Auto-refresh when returning from booking page (or any other screen)
+  useFocusEffect(
+    useCallback(() => {
+      if (initialLoadDone.current) {
+        fetchDashboardData();
+      }
+    }, [fetchDashboardData])
+  );
+
+  // Convert API sports to display format using real slot availability
+  const sportDataForDisplay = useMemo(() => {
+    if (!sports.length) {
+      return getSportDataForDate(selectedDate);
+    }
+    
+    // Map API sports to display format with real slot data
+    // Sort sports by priority (early registered sports first)
+    const sortedSports = [...sports].sort((a, b) => {
+      const priorityA = getSportPriority(a.name);
+      const priorityB = getSportPriority(b.name);
+      // Primary sort by priority
+      if (priorityA !== priorityB) {
+        return priorityA - priorityB;
+      }
+      // Secondary sort by name for same priority
+      return a.name.localeCompare(b.name);
+    });
+
+    return sortedSports.map((sport) => {
+      const slotData = slotAvailabilityMap[sport.id.toString()];
+      let slots;
+
+      if (slotData && slotData.courts && slotData.courts.length > 0) {
+        // Use real slot data from API
+        slots = slotData.courts[0].slots.map(slot => ({
+          time: slot.display_time || formatTime(slot.start_time),
+          status: slot.status,
+        }));
+      } else {
+        // Fallback to generated slots when API data isn't available yet
+        slots = generateSlotsForSport(sport, selectedDate);
+      }
+
+      return {
+        id: sport.id.toString(),
+        name: sport.name,
+        icon: getSportIcon(sport.name),
+        iconColor: getSportColor(sport.name),
+        courts: sport.maximum_court || sport.max_courts || 1,
+        slots,
+      };
+    });
+  }, [sports, selectedDate, slotAvailabilityMap]);
+
+  // Transform API bookings to display format
+  const displayBookings = useMemo(() => {
+    if (!upcomingBookings.length) {
+      return mockUpcomingBookings;
+    }
+    
+    return upcomingBookings.map((booking: any) => ({
+      id: booking.id?.toString() || '0',
+      customerEmail: booking.user_email || booking.user_name || 'Unknown',
+      sport: booking.sport_name || 'N/A',
+      time: booking.time_slot || formatTime(booking.start_time),
+      date: formatBookingDate(booking.booking_date),
+    }));
+  }, [upcomingBookings]);
+
+  const handleLogout = async () => {
+    setProfileMenuOpen(false);
+    await logout();
+    router.replace('/login');
+  };
 
   const handleAddBooking = () => {
     router.push('/booking');
@@ -233,7 +485,7 @@ export default function HomeScreen() {
               <Text style={styles.profileMenuText}>Profile</Text>
             </TouchableOpacity>
             <View style={styles.menuDivider} />
-            <TouchableOpacity style={styles.profileMenuItem} onPress={() => { setProfileMenuOpen(false); router.replace('/login'); }}>
+            <TouchableOpacity style={styles.profileMenuItem} onPress={handleLogout}>
               <Text style={[styles.profileMenuText, { color: '#DC2626' }]}>Logout</Text>
             </TouchableOpacity>
           </View>
@@ -303,70 +555,98 @@ export default function HomeScreen() {
         style={styles.container} 
         contentContainerStyle={styles.contentContainer}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#15803D']} />
+        }
       >
         {/* Dashboard Title and Add Booking Button */}
         <DashboardHeader onAddBooking={handleAddBooking} />
 
+        {/* Loading Indicator */}
+        {loading && (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#15803D" />
+            <Text style={styles.loadingText}>Loading dashboard...</Text>
+          </View>
+        )}
+
+        {/* Error Message */}
+        {error && !loading && (
+          <View style={styles.errorContainer}>
+            <Ionicons name="warning" size={24} color="#DC2626" />
+            <Text style={styles.errorText}>{error}</Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={() => fetchDashboardData()}>
+              <Text style={styles.retryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* Stats Cards */}
-        <View style={styles.statsContainer}>
-          <StatsCard
-            title="Total Sports"
-            value={2}
-            trend="up"
-            trendText="Increased from last month"
-            icon="calendar"
-            variant={activeStat === 'sports' ? 'primary' : 'default'}
-            onPress={() => setActiveStat('sports')}
-          />
-          
-          <StatsCard
-            title="Total Bookings"
-            value={14}
-            trend="up"
-            trendText="Increased from last month"
-            icon="play-circle"
-            variant={activeStat === 'bookings' ? 'primary' : 'default'}
-            onPress={() => setActiveStat('bookings')}
-          />
-          
-          <StatsCard
-            title="Total Revenue"
-            value={0}
-            trend="down"
-            trendText="Decreased from last month"
-            icon="stats-chart"
-            variant={activeStat === 'revenue' ? 'primary' : 'default'}
-            onPress={() => setActiveStat('revenue')}
-          />
-          
-          <StatsCard
-            title="Canceled Booking"
-            value={1}
-            trend="neutral"
-            trendText="On Discussion"
-            icon="time"
-            variant={activeStat === 'canceled' ? 'primary' : 'default'}
-            onPress={() => setActiveStat('canceled')}
-          />
-        </View>
+        {!loading && (
+          <View style={styles.statsContainer}>
+            <StatsCard
+              title="Total Sports"
+              value={dashboardStats?.total_sports ?? sports.length}
+              trend="up"
+              trendText={dashboardStats?.active_sports ? `${dashboardStats.active_sports} active` : 'Manage sports'}
+              icon="calendar"
+              variant={activeStat === 'sports' ? 'primary' : 'default'}
+              onPress={() => setActiveStat('sports')}
+            />
+            
+            <StatsCard
+              title="Total Bookings"
+              value={dashboardStats?.total_bookings ?? 0}
+              trend={dashboardStats?.today_bookings && dashboardStats.today_bookings > 0 ? 'up' : 'neutral'}
+              trendText={dashboardStats?.today_bookings ? `${dashboardStats.today_bookings} today` : 'No bookings today'}
+              icon="play-circle"
+              variant={activeStat === 'bookings' ? 'primary' : 'default'}
+              onPress={() => setActiveStat('bookings')}
+            />
+            
+            <StatsCard
+              title="Total Revenue"
+              value={dashboardStats?.total_revenue ? `Rs ${parseFloat(dashboardStats.total_revenue).toLocaleString()}` : 'Rs 0'}
+              trend={dashboardStats?.today_revenue && parseFloat(dashboardStats.today_revenue) > 0 ? 'up' : 'neutral'}
+              trendText={dashboardStats?.today_revenue ? `Rs ${dashboardStats.today_revenue} today` : 'No revenue today'}
+              icon="stats-chart"
+              variant={activeStat === 'revenue' ? 'primary' : 'default'}
+              onPress={() => setActiveStat('revenue')}
+            />
+            
+            <StatsCard
+              title="Canceled Booking"
+              value={dashboardStats?.cancelled_bookings ?? 0}
+              trend="neutral"
+              trendText={dashboardStats?.pending_bookings ? `${dashboardStats.pending_bookings} pending` : 'Track status'}
+              icon="time"
+              variant={activeStat === 'canceled' ? 'primary' : 'default'}
+              onPress={() => setActiveStat('canceled')}
+            />
+          </View>
+        )}
 
         {/* Slot Availability Section */}
-        <SlotAvailability
-          sports={useMemo(() => getSportDataForDate(selectedDate), [selectedDate])}
-          selectedDate={selectedDate}
-          onNewPress={handleNewSlot}
-          onSlotPress={handleSlotPress}
-          onDateChange={setSelectedDate}
-        />
+        {!loading && (
+          <SlotAvailability
+            sports={sportDataForDisplay}
+            selectedDate={selectedDate}
+            onNewPress={handleNewSlot}
+            onSlotPress={handleSlotPress}
+            onDateChange={setSelectedDate}
+          />
+        )}
 
         {/* Calendar removed per request */}
 
         {/* Upcoming Bookings */}
-        <UpcomingBookings
-          bookings={mockUpcomingBookings}
-          onViewAll={handleViewAllBookings}
-          onBookingPress={handleBookingPress}
-        />
+        {!loading && (
+          <UpcomingBookings
+            bookings={displayBookings}
+            onViewAll={handleViewAllBookings}
+            onBookingPress={handleBookingPress}
+          />
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -386,6 +666,42 @@ const styles = StyleSheet.create({
   },
   statsContainer: {
     paddingHorizontal: 16,
+  },
+  loadingContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+  },
+  loadingText: {
+    marginTop: 12,
+    color: '#6B7280',
+    fontSize: 14,
+  },
+  errorContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+    marginHorizontal: 16,
+    backgroundColor: '#FEF2F2',
+    borderRadius: 8,
+    marginBottom: 16,
+  },
+  errorText: {
+    color: '#DC2626',
+    fontSize: 14,
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  retryBtn: {
+    marginTop: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#DC2626',
+    borderRadius: 6,
+  },
+  retryText: {
+    color: '#fff',
+    fontWeight: '600',
   },
   menuOverlay: { flex: 1, backgroundColor: 'transparent' },
   profileMenuBox: { position: 'absolute', top: 98, right: 12, width: 160, backgroundColor: '#fff', borderRadius: 8, paddingVertical: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 12, elevation: 6, borderWidth: 1, borderColor: '#E5E7EB' },
