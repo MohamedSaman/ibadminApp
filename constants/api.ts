@@ -4,7 +4,7 @@
 // Example: export const BASE_URL = 'http://192.168.1.9:8000';
 
 // Ensure trailing slash so axios baseURL + endpoint paths concatenate correctly
-export const BASE_URL = 'http://192.168.1.11:8000/';
+export const BASE_URL = 'http://192.168.1.14:8000/';
 
 // Legacy endpoints (for backward compatibility)
 export const ENDPOINTS = {
@@ -31,6 +31,8 @@ export const INDOOR_ADMIN_API = {
     revenueReport: 'api/indoor-admin/dashboard/revenue-report/',
     bookingReport: 'api/indoor-admin/dashboard/booking-report/',
     sportsRevenue: 'api/indoor-admin/dashboard/sports-revenue/',
+    performance: 'api/indoor-admin/dashboard/performance/',
+    exportCSV: 'api/indoor-admin/dashboard/export-csv/',
   },
   
   // Venue Management
@@ -61,6 +63,10 @@ export const INDOOR_ADMIN_API = {
     holdSlot: 'api/indoor-admin/bookings/hold-slot/',
     create: 'api/indoor-admin/bookings/create/',
     cancel: (id: number) => `api/indoor-admin/bookings/${id}/cancel/`,
+    updatePayment: (id: number) => `api/indoor-admin/bookings/${id}/update_payment/`,
+    // Permanent (recurring) booking endpoints
+    permanentList: 'api/indoor-admin/bookings/permanent/',
+    permanentCancelAll: (id: number) => `api/indoor-admin/bookings/permanent/${id}/cancel-all/`,
   },
   
   // Facilities Management

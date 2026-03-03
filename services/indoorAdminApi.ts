@@ -28,6 +28,8 @@ import {
   BookingReport,
   BookingReportParams,
   SportsRevenueReport,
+  PerformanceReport,
+  PerformanceReportParams,
   IndoorAdmin,
   IndoorAdminCreatePayload,
   AssignVenuePayload,
@@ -43,6 +45,8 @@ import {
   AdminNotification,
   AdminNotificationListResponse,
   AdminUnreadCountResponse,
+  PermanentBookingListResponse,
+  CancelAllPermanentResponse,
 } from '../types/api';
 
 // =====================================================
@@ -129,6 +133,16 @@ export async function getBookingReport(params?: BookingReportParams): Promise<Bo
 
 export async function getSportsRevenueReport(): Promise<SportsRevenueReport> {
   const res = await api.get(INDOOR_ADMIN_API.dashboard.sportsRevenue);
+  return res.data;
+}
+
+export async function getPerformanceReport(params?: PerformanceReportParams): Promise<PerformanceReport> {
+  const res = await api.get(INDOOR_ADMIN_API.dashboard.performance, { params });
+  return res.data;
+}
+
+export async function exportReportCSV(): Promise<string> {
+  const res = await api.get(INDOOR_ADMIN_API.dashboard.exportCSV, { responseType: 'text' });
   return res.data;
 }
 
@@ -284,6 +298,11 @@ export async function updateBookingStatus(id: number, data: BookingStatusUpdate)
   return res.data;
 }
 
+export async function updateBookingPaymentStatus(id: number, data: { payment_status: 'Pending' | 'Paid' | 'Failed' }): Promise<Booking> {
+  const res = await api.patch(INDOOR_ADMIN_API.bookings.updatePayment(id), data);
+  return res.data;
+}
+
 export async function getTodayBookings(): Promise<any[]> {
   const res = await api.get(INDOOR_ADMIN_API.bookings.today);
   // Backend returns { date, count, bookings } for today endpoint
@@ -318,6 +337,27 @@ export async function createManualBooking(data: AdminCreateBookingPayload): Prom
  */
 export async function cancelBooking(bookingId: number): Promise<AdminCancelBookingResponse> {
   const res = await api.post(INDOOR_ADMIN_API.bookings.cancel(bookingId));
+  return res.data;
+}
+
+/**
+ * Get list of all permanent booking groups at the admin's venue.
+ */
+export async function getPermanentBookings(): Promise<PermanentBookingListResponse> {
+  const res = await api.get(INDOOR_ADMIN_API.bookings.permanentList);
+  return res.data;
+}
+
+/**
+ * Cancel ALL remaining active bookings from a permanent booking group.
+ */
+export async function cancelAllPermanentBookings(
+  permanentSourceId: number,
+  reason?: string
+): Promise<CancelAllPermanentResponse> {
+  const res = await api.post(INDOOR_ADMIN_API.bookings.permanentCancelAll(permanentSourceId), {
+    reason: reason || '',
+  });
   return res.data;
 }
 

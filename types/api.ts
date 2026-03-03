@@ -175,6 +175,10 @@ export interface BookingStatusUpdate {
   reason?: string;
 }
 
+export interface BookingPaymentStatusUpdate {
+  payment_status: 'Pending' | 'Paid' | 'Failed';
+}
+
 // Slot Availability Types
 export interface SlotBookingInfo {
   id: number;
@@ -185,6 +189,12 @@ export interface SlotBookingInfo {
   payment_status: string;
   price: string;
   notes: string;
+  is_permanent?: boolean;
+  permanent_source_id?: number | null;
+  game_name?: string;
+  booking_date?: string;
+  start_time?: string;
+  end_time?: string;
 }
 
 export interface SlotInfo {
@@ -253,8 +263,14 @@ export interface Review {
     first_name: string;
     last_name: string;
   };
+  user_name: string;
+  user_email: string;
+  profile_picture: string | null;
   rating: number;
   comment?: string;
+  categories?: string[];
+  would_recommend?: boolean;
+  photos?: string[];
   created_at: string;
   response?: string;
   responded_at?: string;
@@ -269,6 +285,7 @@ export interface SportReview extends Review {
     id: number;
     name: string;
   };
+  visit_date?: string;
 }
 
 // Dashboard Stats Types - matches backend DashboardStatsSerializer
@@ -342,6 +359,64 @@ export interface SportsRevenueReport {
   total_sports: number;
 }
 
+// Performance & Utilization Report
+export interface HourlyDistributionItem {
+  hour: number;
+  label: string;
+  count: number;
+}
+
+export interface DailyDistributionItem {
+  day: number;
+  label: string;
+  count: number;
+}
+
+export interface CourtUtilizationItem {
+  court: string;
+  bookings: number;
+  percentage: number;
+}
+
+export interface SportUtilizationItem {
+  sport_name: string;
+  bookings: number;
+  percentage: number;
+}
+
+export interface StatusDistributionItem {
+  status: string;
+  count: number;
+  percentage: number;
+}
+
+export interface PerformanceReport {
+  summary: {
+    total_bookings: number;
+    completed: number;
+    cancelled: number;
+    no_show: number;
+    confirmed: number;
+    completion_rate: number;
+    cancellation_rate: number;
+    no_show_rate: number;
+    average_daily_bookings: number;
+    busiest_day: string;
+    busiest_hour: string;
+    avg_revenue_per_booking: string;
+  };
+  hourly_distribution: HourlyDistributionItem[];
+  daily_distribution: DailyDistributionItem[];
+  court_utilization: CourtUtilizationItem[];
+  sport_utilization: SportUtilizationItem[];
+  status_distribution: StatusDistributionItem[];
+}
+
+export interface PerformanceReportParams {
+  start_date?: string;
+  end_date?: string;
+}
+
 // Super Admin Types
 export interface IndoorAdminCreatePayload {
   email: string;
@@ -413,6 +488,8 @@ export interface AdminCreateBookingPayload {
   payment_status?: 'Pending' | 'Paid'; // defaults to 'Paid'
   notes?: string;
   skip_hold?: boolean; // defaults to true
+  is_permanent?: boolean; // create recurring weekly bookings
+  permanent_weeks?: number; // number of weeks (default 4, min 2, max 52)
 }
 
 export interface AdminBookingResponse {
@@ -430,16 +507,57 @@ export interface AdminBookingResponse {
   sport_name?: string;
   qr_code?: string;
   created_at: string;
+  is_permanent?: boolean;
+  permanent_source_id?: number | null;
 }
 
 export interface AdminCreateBookingResponse {
   message: string;
   bookings: AdminBookingResponse[];
+  is_permanent?: boolean;
+  permanent_source_id?: number | null;
 }
 
 export interface AdminCancelBookingResponse {
   message: string;
   booking: AdminBookingResponse;
+}
+
+// Permanent Booking Types
+export interface PermanentBookingChild {
+  id: number;
+  booking_date: string;
+  start_time: string;
+  end_time: string;
+  court_number: string;
+  status: string;
+  price: string;
+  customer_name: string;
+}
+
+export interface PermanentBookingGroup {
+  id: number;
+  sport_id: number;
+  sport_name: string;
+  customer_name: string;
+  customer_phone: string;
+  start_time: string;
+  end_time: string;
+  price: string;
+  created_at: string;
+  active_bookings_count: number;
+  cancelled_count: number;
+  bookings: PermanentBookingChild[];
+}
+
+export interface PermanentBookingListResponse {
+  count: number;
+  results: PermanentBookingGroup[];
+}
+
+export interface CancelAllPermanentResponse {
+  message: string;
+  cancelled_count: number;
 }
 
 // Staff Member Types

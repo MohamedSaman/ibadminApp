@@ -48,6 +48,11 @@ export default function SignupScreen() {
       Alert.alert('Missing Fields', 'Please fill in all fields');
       return;
     }
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (phoneDigits.length !== 10) {
+      Alert.alert('Invalid Phone', 'Phone number must be exactly 10 digits.');
+      return;
+    }
     if (password !== confirmPassword) {
       Alert.alert('Password Mismatch', 'Passwords do not match');
       return;
@@ -63,6 +68,11 @@ export default function SignupScreen() {
   const handleSignUp = async () => {
     if (!venueName.trim() || !venueAddress.trim()) {
       Alert.alert('Missing Fields', 'Complex name and address are required');
+      return;
+    }
+    const venuePhoneDigits = (venueContact || phone).replace(/\D/g, '');
+    if (venuePhoneDigits.length !== 10) {
+      Alert.alert('Invalid Phone', 'Complex contact number must be exactly 10 digits.');
       return;
     }
     setLoading(true);
@@ -157,11 +167,15 @@ export default function SignupScreen() {
           <Ionicons name="call" size={18} color="#6B7280" style={{ marginRight: 8 }} />
           <TextInput
             style={styles.input}
-            placeholder="+94 76 123 4567"
+            placeholder="Enter 10-digit phone number"
             placeholderTextColor="#9CA3AF"
             keyboardType="phone-pad"
+            maxLength={10}
             value={phone}
-            onChangeText={setPhone}
+            onChangeText={(text) => {
+              const digitsOnly = text.replace(/\D/g, '');
+              setPhone(digitsOnly.slice(0, 10));
+            }}
           />
         </View>
       </View>
@@ -321,11 +335,15 @@ export default function SignupScreen() {
           <Ionicons name="call" size={18} color="#6B7280" style={{ marginRight: 8 }} />
           <TextInput
             style={styles.input}
-            placeholder="Same as personal or different"
+            placeholder="Enter 10-digit phone number"
             placeholderTextColor="#9CA3AF"
             keyboardType="phone-pad"
+            maxLength={10}
             value={venueContact || phone}
-            onChangeText={setVenueContact}
+            onChangeText={(text) => {
+              const digitsOnly = text.replace(/\D/g, '');
+              setVenueContact(digitsOnly.slice(0, 10));
+            }}
             editable={!loading}
           />
         </View>

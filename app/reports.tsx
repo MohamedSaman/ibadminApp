@@ -1,10 +1,13 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Dimensions, Image, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, Image, Platform, RefreshControl, SafeAreaView, ScrollView, Share, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
-import { getDashboardStats, getRevenueReport, getBookingReport, getBookings, getSportsRevenueReport } from '@/services/indoorAdminApi';
-import { DashboardStats, RevenueReport, RevenueDataPoint, BookingReport, SportsRevenueReport } from '@/types/api';
+import { getDashboardStats, getRevenueReport, getBookingReport, getSportsRevenueReport, getPerformanceReport, exportReportCSV } from '@/services/indoorAdminApi';
+import { DashboardStats, RevenueReport, RevenueDataPoint, BookingReport, SportsRevenueReport, PerformanceReport } from '@/types/api';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import * as Print from 'expo-print';
 
 const screenWidth = Dimensions.get('window').width;
 
@@ -50,8 +53,13 @@ export default function ReportsScreen() {
   const [loadingRevenueReport, setLoadingRevenueReport] = useState(false);
   const [loadingSportsRevenue, setLoadingSportsRevenue] = useState(false);
   const [showSportsRevenueReport, setShowSportsRevenueReport] = useState(false);
+  const [showPerformanceReport, setShowPerformanceReport] = useState(false);
+  const [performanceData, setPerformanceData] = useState<PerformanceReport | null>(null);
+  const [loadingPerformance, setLoadingPerformance] = useState(false);
   const [chartData, setChartData] = useState<RevenueDataPoint[]>([]);
   const [loadingChart, setLoadingChart] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
 
   // Fetch chart data from revenue API - always daily for day-by-day view
   const fetchChartData = useCallback(async (period: string) => {
@@ -89,10 +97,36 @@ export default function ReportsScreen() {
     fetchChartData(timePeriod);
   }, [fetchStats, fetchChartData]);
 
+  // Fetch booking report data
+  const fetchBookingReport = useCallback(async () => {
+    try {
+      setLoadingBookingReport(true);
+      const data = await getBookingReport();
+      setBookingReportData(data);
+    } catch (err) {
+      console.error('Failed to fetch booking report:', err);
+    } finally {
+      setLoadingBookingReport(false);
+    }
+  }, []);
+
   const onRefresh = useCallback(() => {
     fetchStats(true);
     fetchChartData(timePeriod);
-  }, [fetchStats, fetchChartData, timePeriod]);
+    // Also refresh booking report if it's visible
+    if (showBookingReport) {
+      fetchBookingReport();
+    }
+  }, [fetchStats, fetchChartData, timePeriod, showBookingReport, fetchBookingReport]);
+
+  // Refresh booking report data when screen comes into focus (after creating booking)
+  useFocusEffect(
+    useCallback(() => {
+      if (showBookingReport) {
+        fetchBookingReport();
+      }
+    }, [showBookingReport, fetchBookingReport])
+  );
 
   // Format chart labels - day by day
   const getChartLabels = (data: RevenueDataPoint[]): string[] => {
@@ -139,30 +173,7 @@ export default function ReportsScreen() {
   // Fetch booking report when modal is opened
   const handleShowBookingReport = async () => {
     setShowBookingReport(true);
-    setLoadingBookingReport(true);
-    try {
-      // Fetch actual bookings list from the backend
-      const data = await getBookings();
-      const bookings = data.results || data || [];
-      // Build summary from the bookings
-      const total = bookings.length;
-      const confirmed = bookings.filter((b: any) => b.status === 'Confirmed' || b.status === 'Upcoming').length;
-      const cancelled = bookings.filter((b: any) => b.status === 'Cancelled').length;
-      const completed = bookings.filter((b: any) => b.status === 'Completed').length;
-      const pending = bookings.filter((b: any) => b.status === 'Pending').length;
-      const totalRevenue = bookings
-        .filter((b: any) => ['Confirmed', 'Upcoming', 'Completed'].includes(b.status))
-        .reduce((sum: number, b: any) => sum + parseFloat(b.price || '0'), 0);
-      
-      setBookingReportData({
-        bookings,
-        summary: { total, confirmed, cancelled, completed, pending, total_revenue: totalRevenue.toFixed(2) },
-      });
-    } catch (err) {
-      console.error('Failed to fetch booking report:', err);
-    } finally {
-      setLoadingBookingReport(false);
-    }
+    await fetchBookingReport();
   };
 
   // Fetch revenue report when modal is opened
@@ -194,6 +205,20 @@ export default function ReportsScreen() {
     }
   };
 
+  // Fetch performance & utilization report
+  const handleShowPerformanceReport = async () => {
+    setShowPerformanceReport(true);
+    setLoadingPerformance(true);
+    try {
+      const data = await getPerformanceReport();
+      setPerformanceData(data);
+    } catch (err) {
+      console.error('Failed to fetch performance report:', err);
+    } finally {
+      setLoadingPerformance(false);
+    }
+  };
+
   const statCards = [
     { id: 'total', title: 'Total Bookings', value: stats?.total_bookings?.toString() ?? '0', bg: '#DBEAFE', textColor: '#0369A1' },
     { id: 'upcoming', title: 'Upcoming Bookings (Today)', value: stats?.today_bookings?.toString() ?? '0', bg: '#FEFCE8', textColor: '#854D0E' },
@@ -211,8 +236,384 @@ export default function ReportsScreen() {
     time: b.time_slot || `${formatTime(b.start_time)} - ${formatTime(b.end_time)}`,
     duration: '1.00',
     status: (b.status || 'Pending').toUpperCase(),
+    paymentStatus: (b.payment_status || 'Pending').toUpperCase(),
     revenue: formatCurrency(b.price || '0'),
   })) || [];
+
+  // Generate CSV content for reports from provided data
+  const generateCSVFromData = (
+    statsData: DashboardStats | null,
+    bookingData: any,
+    revenueData: RevenueReport | null,
+    sportsData: SportsRevenueReport | null,
+    perfData: PerformanceReport | null
+  ): string => {
+    const lines: string[] = [];
+    const now = new Date().toLocaleString();
+
+    // Header with timestamp
+    lines.push('INDOOR BOOKING ADMIN - REPORTS EXPORT');
+    lines.push(`Generated on: ${now}`);
+    lines.push('');
+
+    // Dashboard Summary
+    lines.push('DASHBOARD SUMMARY');
+    lines.push('Metric,Value');
+    lines.push(`Total Bookings,"${statsData?.total_bookings || 0}"`);
+    lines.push(`Today's Bookings,"${statsData?.today_bookings || 0}"`);
+    lines.push(`Total Revenue,"${statsData?.total_revenue || 'LKR 0.00'}"`);
+    lines.push(`Cancelled Bookings,"${statsData?.cancelled_bookings || 0}"`);
+    lines.push('');
+
+    // Booking Report
+    const rows = bookingData?.bookings?.map((b: any) => ({
+      id: b.id,
+      username: b.user_email || b.user_name || 'N/A',
+      court: b.court_number?.toString() || '1',
+      sport: b.sport_name || 'N/A',
+      date: formatDate(b.booking_date),
+      time: b.time_slot || `${formatTime(b.start_time)} - ${formatTime(b.end_time)}`,
+      duration: '1.00',
+      status: (b.status || 'Pending').toUpperCase(),
+      paymentStatus: (b.payment_status || 'Pending').toUpperCase(),
+      revenue: formatCurrency(b.price || '0'),
+    })) || [];
+
+    if (rows.length > 0) {
+      lines.push('BOOKING REPORT');
+      lines.push('ID,Username,Court,Sport,Date,Time,Duration,Status,Payment Status,Revenue');
+      rows.forEach((row: any) => {
+        lines.push(`"${row.id}","${row.username}","${row.court}","${row.sport}","${row.date}","${row.time}","${row.duration}","${row.status}","${row.paymentStatus}","${row.revenue}"`);
+      });
+      lines.push('');
+    }
+
+    // Revenue Report
+    if (revenueData?.data && revenueData.data.length > 0) {
+      lines.push('REVENUE REPORT');
+      lines.push('Date,Revenue');
+      revenueData.data.forEach((item) => {
+        lines.push(`"${item.date}","LKR ${parseFloat(item.revenue).toFixed(2)}"`);
+      });
+      lines.push('');
+    }
+
+    // Sports Revenue Report
+    if (sportsData?.data && sportsData.data.length > 0) {
+      lines.push('SPORTS REVENUE BREAKDOWN');
+      lines.push('Sport,Revenue,Bookings');
+      sportsData.data.forEach((item) => {
+        lines.push(`"${item.sport_name}","LKR ${parseFloat(item.revenue).toFixed(2)}","${item.booking_count}"`);
+      });
+      lines.push('');
+    }
+
+    // Performance Report
+    if (perfData) {
+      lines.push('PERFORMANCE & UTILIZATION');
+      lines.push('Metric,Value');
+      lines.push(`Completion Rate,"${perfData.summary?.completion_rate || 0}%"`);
+      lines.push(`Cancellation Rate,"${perfData.summary?.cancellation_rate || 0}%"`);
+      lines.push(`Avg Daily Bookings,"${perfData.summary?.average_daily_bookings || 0}"`);
+      lines.push(`Busiest Day,"${perfData.summary?.busiest_day || 'N/A'}"`);
+      lines.push(`Busiest Hour,"${perfData.summary?.busiest_hour || 'N/A'}"`);
+      lines.push('');
+
+      if (perfData.sport_utilization && perfData.sport_utilization.length > 0) {
+        lines.push('SPORT UTILIZATION');
+        lines.push('Sport,Bookings,Utilization %');
+        perfData.sport_utilization.forEach((item) => {
+          lines.push(`"${item.sport_name}","${item.bookings}","${item.percentage}%"`);
+        });
+      }
+    }
+
+    return lines.join('\n');
+  };
+
+  // Fetch all report data for export
+  const fetchAllReportData = async () => {
+    const [freshStats, freshBooking, freshRevenue, freshSports, freshPerformance] = await Promise.allSettled([
+      getDashboardStats(),
+      getBookingReport(),
+      getRevenueReport({ period: 'daily' }),
+      getSportsRevenueReport(),
+      getPerformanceReport(),
+    ]);
+
+    if (freshStats.status === 'fulfilled') setStats(freshStats.value);
+    if (freshBooking.status === 'fulfilled') setBookingReportData(freshBooking.value);
+    if (freshRevenue.status === 'fulfilled') setRevenueReportData(freshRevenue.value);
+    if (freshSports.status === 'fulfilled') setSportsRevenueData(freshSports.value);
+    if (freshPerformance.status === 'fulfilled') setPerformanceData(freshPerformance.value);
+
+    return {
+      statsData: freshStats.status === 'fulfilled' ? freshStats.value : stats,
+      bookingData: freshBooking.status === 'fulfilled' ? freshBooking.value : bookingReportData,
+      revenueData: freshRevenue.status === 'fulfilled' ? freshRevenue.value : revenueReportData,
+      sportsData: freshSports.status === 'fulfilled' ? freshSports.value : sportsRevenueData,
+      perfData: freshPerformance.status === 'fulfilled' ? freshPerformance.value : performanceData,
+    };
+  };
+
+  // Generate PDF HTML content
+  const generatePDFHtml = (
+    statsData: DashboardStats | null,
+    bookingData: any,
+    revenueData: RevenueReport | null,
+    sportsData: SportsRevenueReport | null,
+    perfData: PerformanceReport | null
+  ): string => {
+    const now = new Date().toLocaleString();
+
+    const bookingRows = bookingData?.bookings?.map((b: any) => ({
+      id: b.id,
+      username: b.user_email || b.user_name || 'N/A',
+      court: b.court_number?.toString() || '1',
+      sport: b.sport_name || 'N/A',
+      date: formatDate(b.booking_date),
+      time: b.time_slot || `${formatTime(b.start_time)} - ${formatTime(b.end_time)}`,
+      status: (b.status || 'Pending').toUpperCase(),
+      paymentStatus: (b.payment_status || 'Pending').toUpperCase(),
+      revenue: formatCurrency(b.price || '0'),
+    })) || [];
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #1F2937; padding: 32px; font-size: 11px; }
+          .header { text-align: center; margin-bottom: 24px; border-bottom: 3px solid #15803D; padding-bottom: 16px; }
+          .header h1 { font-size: 22px; color: #15803D; margin-bottom: 4px; }
+          .header p { font-size: 11px; color: #6B7280; }
+          .section { margin-bottom: 20px; }
+          .section-title { font-size: 14px; font-weight: 700; color: #15803D; margin-bottom: 10px; padding-bottom: 4px; border-bottom: 1px solid #D1FAE5; }
+          .stats-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+          .stat-card { flex: 1; min-width: 120px; background: #F0FDF4; border-radius: 8px; padding: 12px; text-align: center; border: 1px solid #BBF7D0; }
+          .stat-card .value { font-size: 20px; font-weight: 700; color: #15803D; }
+          .stat-card .label { font-size: 10px; color: #6B7280; margin-top: 2px; }
+          table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 10px; }
+          th { background: #15803D; color: #fff; padding: 6px 8px; text-align: left; font-weight: 600; }
+          td { padding: 5px 8px; border-bottom: 1px solid #E5E7EB; }
+          tr:nth-child(even) { background: #F9FAFB; }
+          .status-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 600; }
+          .status-confirmed { background: #D1FAE5; color: #065F46; }
+          .status-cancelled { background: #FEE2E2; color: #991B1B; }
+          .status-pending { background: #FEF3C7; color: #92400E; }
+          .status-completed { background: #DBEAFE; color: #1E40AF; }
+          .status-paid { background: #D1FAE5; color: #065F46; }
+          .status-unpaid { background: #FEE2E2; color: #991B1B; }
+          .perf-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+          .perf-item { flex: 1; min-width: 100px; background: #F8FAFC; border-radius: 8px; padding: 10px; text-align: center; border: 1px solid #E2E8F0; }
+          .perf-item .val { font-size: 18px; font-weight: 700; color: #0F172A; }
+          .perf-item .lbl { font-size: 9px; color: #64748B; margin-top: 2px; }
+          .footer { margin-top: 24px; text-align: center; font-size: 9px; color: #9CA3AF; border-top: 1px solid #E5E7EB; padding-top: 8px; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1>Indoor Booking Admin</h1>
+          <p>Reports Export &bull; Generated on ${now}</p>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Dashboard Summary</div>
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="value">${statsData?.total_bookings || 0}</div>
+              <div class="label">Total Bookings</div>
+            </div>
+            <div class="stat-card">
+              <div class="value">${statsData?.today_bookings || 0}</div>
+              <div class="label">Today's Bookings</div>
+            </div>
+            <div class="stat-card">
+              <div class="value">${statsData?.total_revenue ? formatCurrency(statsData.total_revenue) : 'LKR 0.00'}</div>
+              <div class="label">Total Revenue</div>
+            </div>
+            <div class="stat-card">
+              <div class="value">${statsData?.cancelled_bookings || 0}</div>
+              <div class="label">Cancelled</div>
+            </div>
+          </div>
+        </div>
+
+        ${bookingRows.length > 0 ? `
+        <div class="section">
+          <div class="section-title">Booking Report</div>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>User</th><th>Sport</th><th>Court</th><th>Date</th><th>Time</th><th>Status</th><th>Payment</th><th>Revenue</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${bookingRows.map((r: any) => `
+                <tr>
+                  <td>${r.id}</td>
+                  <td>${r.username}</td>
+                  <td>${r.sport}</td>
+                  <td>${r.court}</td>
+                  <td>${r.date}</td>
+                  <td>${r.time}</td>
+                  <td><span class="status-badge status-${r.status.toLowerCase()}">${r.status}</span></td>
+                  <td><span class="status-badge status-${r.paymentStatus === 'PAID' ? 'paid' : 'unpaid'}">${r.paymentStatus}</span></td>
+                  <td>${r.revenue}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        ` : ''}
+
+        ${revenueData?.data && revenueData.data.length > 0 ? `
+        <div class="section">
+          <div class="section-title">Revenue Report</div>
+          <table>
+            <thead><tr><th>Date</th><th>Revenue</th></tr></thead>
+            <tbody>
+              ${revenueData.data.map(item => `
+                <tr><td>${item.date}</td><td>LKR ${parseFloat(item.revenue).toFixed(2)}</td></tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        ` : ''}
+
+        ${sportsData?.data && sportsData.data.length > 0 ? `
+        <div class="section">
+          <div class="section-title">Sports Revenue Breakdown</div>
+          <table>
+            <thead><tr><th>Sport</th><th>Revenue</th><th>Bookings</th></tr></thead>
+            <tbody>
+              ${sportsData.data.map(item => `
+                <tr><td>${item.sport_name}</td><td>LKR ${parseFloat(item.revenue).toFixed(2)}</td><td>${item.booking_count}</td></tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        ` : ''}
+
+        ${perfData ? `
+        <div class="section">
+          <div class="section-title">Performance & Utilization</div>
+          <div class="perf-grid">
+            <div class="perf-item"><div class="val">${perfData.summary?.completion_rate || 0}%</div><div class="lbl">Completion Rate</div></div>
+            <div class="perf-item"><div class="val">${perfData.summary?.cancellation_rate || 0}%</div><div class="lbl">Cancellation Rate</div></div>
+            <div class="perf-item"><div class="val">${perfData.summary?.average_daily_bookings || 0}</div><div class="lbl">Avg Daily Bookings</div></div>
+            <div class="perf-item"><div class="val">${perfData.summary?.busiest_day || 'N/A'}</div><div class="lbl">Busiest Day</div></div>
+            <div class="perf-item"><div class="val">${perfData.summary?.busiest_hour || 'N/A'}</div><div class="lbl">Busiest Hour</div></div>
+          </div>
+          ${perfData.sport_utilization && perfData.sport_utilization.length > 0 ? `
+          <table style="margin-top: 12px;">
+            <thead><tr><th>Sport</th><th>Bookings</th><th>Utilization</th></tr></thead>
+            <tbody>
+              ${perfData.sport_utilization.map(item => `
+                <tr><td>${item.sport_name}</td><td>${item.bookings}</td><td>${item.percentage}%</td></tr>
+              `).join('')}
+            </tbody>
+          </table>
+          ` : ''}
+        </div>
+        ` : ''}
+
+        <div class="footer">Indoor Booking Admin &copy; ${new Date().getFullYear()}</div>
+      </body>
+      </html>
+    `;
+  };
+
+  // Handle export to CSV
+  const handleExportCSV = async () => {
+    try {
+      setExporting(true);
+      setShowExportMenu(false);
+
+      let csvContent = '';
+
+      // Try backend CSV export first
+      try {
+        csvContent = await exportReportCSV();
+      } catch (backendErr) {
+        console.log('Backend export not available, using client-side generation');
+        const { statsData, bookingData, revenueData, sportsData, perfData } = await fetchAllReportData();
+        csvContent = generateCSVFromData(statsData, bookingData, revenueData, sportsData, perfData);
+      }
+
+      // Try file-based sharing (expo-file-system + expo-sharing)
+      const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
+      if (baseDir) {
+        try {
+          const fileName = `reports_${new Date().getTime()}.csv`;
+          const filePath = `${baseDir}${fileName}`;
+
+          await FileSystem.writeAsStringAsync(filePath, csvContent, {
+            encoding: FileSystem.EncodingType.UTF8,
+          });
+
+          if (await Sharing.isAvailableAsync()) {
+            await Sharing.shareAsync(filePath, {
+              mimeType: 'text/csv',
+              dialogTitle: 'Export Reports',
+              UTI: 'public.comma-separated-values-text',
+            });
+            return;
+          }
+        } catch (fileErr) {
+          console.log('File-based export failed, falling back to Share API:', fileErr);
+        }
+      }
+
+      // Fallback: Use React Native built-in Share API (shares text content)
+      await Share.share({
+        message: csvContent,
+        title: 'Reports Export',
+      });
+
+    } catch (error) {
+      console.error('CSV export error:', error);
+      Alert.alert('Error', 'Failed to export CSV report. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Handle export to PDF
+  const handleExportPDF = async () => {
+    try {
+      setExporting(true);
+      setShowExportMenu(false);
+
+      // Fetch all report data
+      const { statsData, bookingData, revenueData, sportsData, perfData } = await fetchAllReportData();
+      const html = generatePDFHtml(statsData, bookingData, revenueData, sportsData, perfData);
+
+      // Generate PDF
+      const { uri } = await Print.printToFileAsync({
+        html,
+        base64: false,
+      });
+
+      // Share the PDF file
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, {
+          mimeType: 'application/pdf',
+          dialogTitle: 'Export Reports PDF',
+          UTI: 'com.adobe.pdf',
+        });
+      } else {
+        Alert.alert('Success', 'PDF report generated successfully.');
+      }
+    } catch (error) {
+      console.error('PDF export error:', error);
+      Alert.alert('Error', 'Failed to export PDF report. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -226,12 +627,40 @@ export default function ReportsScreen() {
 
       <ScrollView contentContainerStyle={styles.container} refreshControl={
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#15803D']} />
-      }>
+      } onScrollBeginDrag={() => setShowExportMenu(false)}>
         <View style={styles.exportContainer}>
-          <TouchableOpacity style={styles.exportBtn} onPress={() => { /* export action */ }}>
-            <Ionicons name="download" size={16} color="#fff" />
-            <Text style={styles.exportText}>Export</Text>
+          <TouchableOpacity
+            style={[styles.exportBtn, exporting && { opacity: 0.6 }]}
+            onPress={() => setShowExportMenu(!showExportMenu)}
+            disabled={exporting}
+          >
+            {exporting ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Ionicons name="download" size={16} color="#fff" />
+            )}
+            <Text style={styles.exportText}>{exporting ? 'Exporting...' : 'Export'}</Text>
+            {!exporting && <Ionicons name="chevron-down" size={14} color="#fff" />}
           </TouchableOpacity>
+          {showExportMenu && (
+            <View style={styles.exportMenu}>
+              <TouchableOpacity style={styles.exportMenuItem} onPress={handleExportCSV}>
+                <Ionicons name="document-text-outline" size={18} color="#15803D" />
+                <View style={styles.exportMenuTextWrap}>
+                  <Text style={styles.exportMenuLabel}>Export as CSV</Text>
+                  <Text style={styles.exportMenuSub}>Spreadsheet format</Text>
+                </View>
+              </TouchableOpacity>
+              <View style={styles.exportMenuDivider} />
+              <TouchableOpacity style={styles.exportMenuItem} onPress={handleExportPDF}>
+                <Ionicons name="document-outline" size={18} color="#DC2626" />
+                <View style={styles.exportMenuTextWrap}>
+                  <Text style={styles.exportMenuLabel}>Export as PDF</Text>
+                  <Text style={styles.exportMenuSub}>Printable report</Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
         {/* Loading State */}
@@ -359,7 +788,7 @@ export default function ReportsScreen() {
             <Text style={styles.actionText}>Sports Revenue</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={[styles.actionBtn, styles.performanceBtn]} onPress={() => { /* TODO: Performance page */ }}>
+          <TouchableOpacity style={[styles.actionBtn, styles.performanceBtn]} onPress={handleShowPerformanceReport}>
             <Ionicons name="trending-up" size={20} color="#fff" />
             <Text style={styles.actionText}>Performance & Utilization</Text>
           </TouchableOpacity>
@@ -371,9 +800,14 @@ export default function ReportsScreen() {
           <View style={styles.reportModal}>
             <View style={styles.reportHeader}>
               <Text style={styles.reportTitle}>Comprehensive Booking Details Report - Indoor Booking System</Text>
-              <TouchableOpacity onPress={() => setShowBookingReport(false)} style={styles.reportCloseBtn}>
-                <Ionicons name="close" size={24} color="#374151" />
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TouchableOpacity onPress={fetchBookingReport} style={styles.reportCloseBtn} disabled={loadingBookingReport}>
+                  <Ionicons name="refresh" size={20} color={loadingBookingReport ? '#9CA3AF' : '#374151'} />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowBookingReport(false)} style={styles.reportCloseBtn}>
+                  <Ionicons name="close" size={24} color="#374151" />
+                </TouchableOpacity>
+              </View>
             </View>
 
             <ScrollView contentContainerStyle={styles.reportContent} keyboardShouldPersistTaps="handled">
@@ -398,9 +832,11 @@ export default function ReportsScreen() {
 
               {!loadingBookingReport && bookingReportData && (
                 <View style={styles.bookingSummaryRow}>
-                  <Text style={styles.summaryText}>Total: {bookingReportData.summary?.total ?? 0} | </Text>
-                  <Text style={[styles.summaryText, { color: '#15803D' }]}>Confirmed: {bookingReportData.summary?.confirmed ?? 0}</Text>
-                  <Text style={[styles.summaryText, { color: '#DC2626' }]}> | Cancelled: {bookingReportData.summary?.cancelled ?? 0}</Text>
+                  <Text style={styles.summaryText}>Total: {bookingReportData.summary?.total ?? 0}  </Text>
+                  <Text style={[styles.summaryText, { color: '#15803D' }]}>Confirmed: {bookingReportData.summary?.confirmed ?? 0}  </Text>
+                  <Text style={[styles.summaryText, { color: '#DC2626' }]}>Cancelled: {bookingReportData.summary?.cancelled ?? 0}  </Text>
+                  <Text style={[styles.summaryText, { color: '#0369A1' }]}>Paid: {bookingReportData.summary?.paid ?? 0}  </Text>
+                  <Text style={[styles.summaryText, { color: '#B45309' }]}>Unpaid: {bookingReportData.summary?.unpaid ?? 0}</Text>
                 </View>
               )}
 
@@ -416,6 +852,7 @@ export default function ReportsScreen() {
                       <Text style={[styles.th, { width: 180 }]}>Time</Text>
                       <Text style={[styles.th, { width: 130 }]}>Duration (Hours)</Text>
                       <Text style={[styles.th, { width: 120 }]}>Status</Text>
+                      <Text style={[styles.th, { width: 120 }]}>Payment</Text>
                       <Text style={[styles.th, { width: 150 }]}>Revenue</Text>
                     </View>
 
@@ -431,6 +868,11 @@ export default function ReportsScreen() {
                         <View style={[styles.td, { width: 120 }]}> 
                           <View style={[styles.statusBadge, { backgroundColor: row.status === 'CONFIRMED' ? '#DCFCE7' : row.status === 'CANCELLED' ? '#FEE2E2' : '#FEF3C7' }]}>
                             <Text style={[styles.statusBadgeText, { color: row.status === 'CONFIRMED' ? '#166534' : row.status === 'CANCELLED' ? '#991B1B' : '#92400E' }]}>{row.status}</Text>
+                          </View>
+                        </View>
+                        <View style={[styles.td, { width: 120 }]}>
+                          <View style={[styles.statusBadge, { backgroundColor: row.paymentStatus === 'PAID' ? '#DCFCE7' : '#FEF3C7' }]}>
+                            <Text style={[styles.statusBadgeText, { color: row.paymentStatus === 'PAID' ? '#166534' : '#92400E' }]}>{row.paymentStatus}</Text>
                           </View>
                         </View>
                         <Text style={[styles.td, { width: 150 }]}>{row.revenue}</Text>
@@ -623,6 +1065,176 @@ export default function ReportsScreen() {
           </View>
         </View>
       )}
+
+      {showPerformanceReport && (
+        <View style={styles.reportOverlay}>
+          <View style={styles.reportModal}>
+            <View style={styles.reportHeader}>
+              <Text style={styles.reportTitle}>Performance &amp; Utilization Report</Text>
+              <TouchableOpacity onPress={() => setShowPerformanceReport(false)} style={styles.reportCloseBtn}>
+                <Ionicons name="close" size={24} color="#374151" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.reportContent} keyboardShouldPersistTaps="handled">
+              {loadingPerformance && (
+                <View style={styles.modalLoadingContainer}>
+                  <ActivityIndicator size="large" color="#EA580C" />
+                  <Text style={styles.loadingText}>Loading performance data...</Text>
+                </View>
+              )}
+
+              {!loadingPerformance && performanceData && (
+                <>
+                  {/* ── Summary Cards ── */}
+                  <Text style={styles.perfSectionTitle}>OVERVIEW</Text>
+                  <View style={styles.perfSummaryGrid}>
+                    <View style={[styles.perfCard, { backgroundColor: '#DCFCE7' }]}>
+                      <Text style={styles.perfCardLabel}>Total Bookings</Text>
+                      <Text style={[styles.perfCardValue, { color: '#166534' }]}>{performanceData.summary.total_bookings}</Text>
+                    </View>
+                    <View style={[styles.perfCard, { backgroundColor: '#DBEAFE' }]}>
+                      <Text style={styles.perfCardLabel}>Completion Rate</Text>
+                      <Text style={[styles.perfCardValue, { color: '#0369A1' }]}>{performanceData.summary.completion_rate}%</Text>
+                    </View>
+                    <View style={[styles.perfCard, { backgroundColor: '#FEE2E2' }]}>
+                      <Text style={styles.perfCardLabel}>Cancellation Rate</Text>
+                      <Text style={[styles.perfCardValue, { color: '#991B1B' }]}>{performanceData.summary.cancellation_rate}%</Text>
+                    </View>
+                    <View style={[styles.perfCard, { backgroundColor: '#FEF3C7' }]}>
+                      <Text style={styles.perfCardLabel}>No-Show Rate</Text>
+                      <Text style={[styles.perfCardValue, { color: '#92400E' }]}>{performanceData.summary.no_show_rate}%</Text>
+                    </View>
+                    <View style={[styles.perfCard, { backgroundColor: '#F3E8FF' }]}>
+                      <Text style={styles.perfCardLabel}>Avg Daily Bookings</Text>
+                      <Text style={[styles.perfCardValue, { color: '#6B21A8' }]}>{performanceData.summary.average_daily_bookings}</Text>
+                    </View>
+                    <View style={[styles.perfCard, { backgroundColor: '#FFEDD5' }]}>
+                      <Text style={styles.perfCardLabel}>Avg Revenue / Booking</Text>
+                      <Text style={[styles.perfCardValue, { color: '#C2410C' }]}>{formatCurrency(performanceData.summary.avg_revenue_per_booking)}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.perfHighlightRow}>
+                    <View style={styles.perfHighlight}>
+                      <Ionicons name="calendar" size={16} color="#EA580C" />
+                      <Text style={styles.perfHighlightLabel}>Busiest Day</Text>
+                      <Text style={styles.perfHighlightValue}>{performanceData.summary.busiest_day}</Text>
+                    </View>
+                    <View style={styles.perfHighlight}>
+                      <Ionicons name="time" size={16} color="#EA580C" />
+                      <Text style={styles.perfHighlightLabel}>Busiest Hour</Text>
+                      <Text style={styles.perfHighlightValue}>{performanceData.summary.busiest_hour}</Text>
+                    </View>
+                  </View>
+
+                  {/* ── Booking Status Distribution ── */}
+                  <Text style={styles.perfSectionTitle}>BOOKING STATUS</Text>
+                  {performanceData.status_distribution.map((item) => {
+                    const statusColor: Record<string, string> = {
+                      Completed: '#15803D', Confirmed: '#0369A1', Upcoming: '#0369A1',
+                      Cancelled: '#DC2626', Pending: '#B45309', 'No-Show': '#7C3AED', Playing: '#EA580C',
+                    };
+                    const color = statusColor[item.status] || '#6B7280';
+                    return (
+                      <View key={item.status} style={styles.perfBarRow}>
+                        <Text style={styles.perfBarLabel}>{item.status}</Text>
+                        <View style={styles.perfBarTrack}>
+                          <View style={[styles.perfBarFill, { width: `${Math.max(item.percentage, 2)}%`, backgroundColor: color }]} />
+                        </View>
+                        <Text style={styles.perfBarCount}>{item.count} ({item.percentage}%)</Text>
+                      </View>
+                    );
+                  })}
+
+                  {/* ── Hourly Distribution ── */}
+                  <Text style={styles.perfSectionTitle}>PEAK HOURS</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
+                    <View style={styles.hourGrid}>
+                      {(() => {
+                        const maxCount = Math.max(...performanceData.hourly_distribution.map(h => h.count), 1);
+                        return performanceData.hourly_distribution
+                          .filter(h => h.count > 0)
+                          .map(h => (
+                            <View key={h.hour} style={styles.hourCol}>
+                              <Text style={styles.hourCount}>{h.count}</Text>
+                              <View style={styles.hourBarTrack}>
+                                <View style={[styles.hourBarFill, { height: `${Math.round(h.count / maxCount * 100)}%` }]} />
+                              </View>
+                              <Text style={styles.hourLabel}>{h.label}</Text>
+                            </View>
+                          ));
+                      })()}
+                      {performanceData.hourly_distribution.every(h => h.count === 0) && (
+                        <Text style={styles.noDataText}>No hourly data</Text>
+                      )}
+                    </View>
+                  </ScrollView>
+
+                  {/* ── Day of Week Distribution ── */}
+                  <Text style={styles.perfSectionTitle}>BOOKINGS BY DAY</Text>
+                  {(() => {
+                    const maxCount = Math.max(...performanceData.daily_distribution.map(d => d.count), 1);
+                    return performanceData.daily_distribution.map(d => (
+                      <View key={d.day} style={styles.perfBarRow}>
+                        <Text style={[styles.perfBarLabel, { width: 90 }]}>{d.label.slice(0, 3)}</Text>
+                        <View style={styles.perfBarTrack}>
+                          <View style={[styles.perfBarFill, { width: `${Math.round(d.count / maxCount * 100)}%`, backgroundColor: '#EA580C' }]} />
+                        </View>
+                        <Text style={styles.perfBarCount}>{d.count}</Text>
+                      </View>
+                    ));
+                  })()}
+
+                  {/* ── Court Utilization ── */}
+                  {performanceData.court_utilization.length > 0 && (
+                    <>
+                      <Text style={styles.perfSectionTitle}>COURT UTILIZATION</Text>
+                      {performanceData.court_utilization.map(c => (
+                        <View key={c.court} style={styles.perfBarRow}>
+                          <Text style={styles.perfBarLabel}>Court {c.court}</Text>
+                          <View style={styles.perfBarTrack}>
+                            <View style={[styles.perfBarFill, { width: `${Math.max(c.percentage, 2)}%`, backgroundColor: '#7C3AED' }]} />
+                          </View>
+                          <Text style={styles.perfBarCount}>{c.bookings} ({c.percentage}%)</Text>
+                        </View>
+                      ))}
+                    </>
+                  )}
+
+                  {/* ── Sport Utilization ── */}
+                  {performanceData.sport_utilization.length > 0 && (
+                    <>
+                      <Text style={styles.perfSectionTitle}>SPORT UTILIZATION</Text>
+                      {performanceData.sport_utilization.map((s, idx) => (
+                        <View key={idx} style={styles.perfBarRow}>
+                          <Text style={styles.perfBarLabel}>{s.sport_name}</Text>
+                          <View style={styles.perfBarTrack}>
+                            <View style={[styles.perfBarFill, { width: `${Math.max(s.percentage, 2)}%`, backgroundColor: '#0369A1' }]} />
+                          </View>
+                          <Text style={styles.perfBarCount}>{s.bookings} ({s.percentage}%)</Text>
+                        </View>
+                      ))}
+                    </>
+                  )}
+                </>
+              )}
+
+              {!loadingPerformance && !performanceData && (
+                <View style={styles.noDataRow}>
+                  <Text style={styles.noDataText}>No performance data available</Text>
+                </View>
+              )}
+
+              <View style={styles.reportActions}>
+                <TouchableOpacity style={styles.reportCloseActionBtn} onPress={() => setShowPerformanceReport(false)}>
+                  <Text style={styles.reportCloseActionText}>Close</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -656,6 +1268,48 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     alignItems: 'flex-end',
     backgroundColor: 'transparent',
+    zIndex: 10,
+  },
+  exportMenu: {
+    position: 'absolute',
+    top: 50,
+    right: 16,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+    minWidth: 190,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  exportMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    gap: 10,
+  },
+  exportMenuTextWrap: {
+    flex: 1,
+  },
+  exportMenuLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1F2937',
+  },
+  exportMenuSub: {
+    fontSize: 10,
+    color: '#9CA3AF',
+    marginTop: 1,
+  },
+  exportMenuDivider: {
+    height: 1,
+    backgroundColor: '#F3F4F6',
+    marginHorizontal: 14,
   },
   cardsGrid: {
     flexDirection: 'row',
@@ -880,4 +1534,131 @@ const styles = StyleSheet.create({
     marginTop: 6,
     textAlign: 'right',
   },
+  // Performance & Utilization Styles
+  perfSectionTitle: {
+    fontWeight: '700',
+    fontSize: 12,
+    color: '#374151',
+    marginTop: 16,
+    marginBottom: 8,
+    letterSpacing: 0.5,
+  },
+  perfSummaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  perfCard: {
+    width: '48%',
+    padding: 12,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  perfCardLabel: {
+    fontSize: 11,
+    color: '#374151',
+    marginBottom: 4,
+  },
+  perfCardValue: {
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  perfHighlightRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  perfHighlight: {
+    width: '48%',
+    flexDirection: 'column',
+    alignItems: 'center',
+    backgroundColor: '#FFF7ED',
+    borderRadius: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+  },
+  perfHighlightLabel: {
+    fontSize: 11,
+    color: '#9A3412',
+    marginTop: 4,
+  },
+  perfHighlightValue: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#EA580C',
+    marginTop: 2,
+  },
+  perfBarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  perfBarLabel: {
+    width: 80,
+    fontSize: 11,
+    color: '#374151',
+    fontWeight: '500',
+  },
+  perfBarTrack: {
+    flex: 1,
+    height: 14,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 7,
+    overflow: 'hidden',
+    marginHorizontal: 8,
+  },
+  perfBarFill: {
+    height: '100%',
+    borderRadius: 7,
+    minWidth: 4,
+  },
+  perfBarCount: {
+    width: 90,
+    fontSize: 10,
+    color: '#6B7280',
+    textAlign: 'right',
+  },
+  hourGrid: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    height: 100,
+    paddingBottom: 20,
+  },
+  hourCol: {
+    alignItems: 'center',
+    marginHorizontal: 4,
+    width: 36,
+    height: '100%',
+    justifyContent: 'flex-end',
+  },
+  hourCount: {
+    fontSize: 9,
+    color: '#6B7280',
+    marginBottom: 2,
+  },
+  hourBarTrack: {
+    width: 20,
+    height: 60,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 4,
+    overflow: 'hidden',
+    justifyContent: 'flex-end',
+  },
+  hourBarFill: {
+    width: '100%',
+    backgroundColor: '#EA580C',
+    borderRadius: 4,
+    minHeight: 4,
+  },
+  hourLabel: {
+    fontSize: 8,
+    color: '#9CA3AF',
+    marginTop: 4,
+    transform: [{ rotate: '-45deg' }],
+    width: 36,
+    textAlign: 'center',
+  },
 });
+

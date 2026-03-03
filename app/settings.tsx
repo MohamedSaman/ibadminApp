@@ -4,6 +4,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View, Image } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { getProfile, updateProfile, changePassword, getVenue, updateVenue, getStaffMembers, createStaffMember, deleteStaffMember, updateStaffMember } from '@/services/indoorAdminApi';
 import { User, Venue, StaffMember as StaffMemberType, VenueUpdatePayload } from '@/types/api';
@@ -27,6 +28,28 @@ export default function SettingsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Load banner notification preference on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem('bannerNotificationsEnabled');
+        if (saved !== null) setBannerNotifications(JSON.parse(saved));
+      } catch (e) {
+        // default to true
+      }
+    })();
+  }, []);
+
+  // Save banner notification preference when changed
+  const handleBannerNotificationToggle = async (value: boolean) => {
+    setBannerNotifications(value);
+    try {
+      await AsyncStorage.setItem('bannerNotificationsEnabled', JSON.stringify(value));
+    } catch (e) {
+      console.error('Failed to save banner notification setting:', e);
+    }
+  };
 
   // Fetch profile and venue data
   const fetchData = useCallback(async (showRefresh = false) => {
@@ -261,6 +284,10 @@ export default function SettingsScreen() {
       Alert.alert('Error', 'Please fill in all required fields');
       return;
     }
+    if (editedStaffPhone.trim() && editedStaffPhone.replace(/\D/g, '').length !== 10) {
+      Alert.alert('Error', 'Phone number must be exactly 10 digits.');
+      return;
+    }
 
     try {
       setSaving(true);
@@ -341,6 +368,10 @@ export default function SettingsScreen() {
 
   // Handle profile update
   const handleSaveProfile = async () => {
+    if (contactNumber.trim() && contactNumber.replace(/\D/g, '').length !== 10) {
+      Alert.alert('Error', 'Phone number must be exactly 10 digits.');
+      return;
+    }
     setSaving(true);
     try {
       await updateProfile({
@@ -453,6 +484,7 @@ export default function SettingsScreen() {
   const [maintenanceDropdownVisible, setMaintenanceDropdownVisible] = useState(false);
   const [emailNotifications, setEmailNotifications] = useState(true);
   const [smsNotifications, setSmsNotifications] = useState(false);
+  const [bannerNotifications, setBannerNotifications] = useState(true);
 
   // Team Member Section State
   const [staffSearch, setStaffSearch] = useState('');
@@ -902,6 +934,16 @@ export default function SettingsScreen() {
             <View style={{ paddingVertical: 8 }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                 <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={styles.label}>Top Banner Alert</Text>
+                  <Text style={styles.securitySubtext}>Show notification banner at top of screen</Text>
+                </View>
+                <Switch value={bannerNotifications} onValueChange={handleBannerNotificationToggle} trackColor={{ false: '#E5E7EB', true: '#2563EB' }} />
+              </View>
+
+              <View style={{ height: 1, backgroundColor: '#F3F4F6', marginVertical: 12 }} />
+
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <View style={{ flex: 1, paddingRight: 12 }}>
                   <Text style={styles.label}>Email Notifications</Text>
                   <Text style={styles.securitySubtext}>Receive notifications via email</Text>
                 </View>
@@ -1047,7 +1089,13 @@ export default function SettingsScreen() {
                     <Text style={styles.shiftBadgeText}>Shift: {staff.shift}</Text>
                   </View>
                   <View style={styles.actionIconsRow}>
-                    <TouchableOpacity style={styles.actionIconBtn}>
+                    <TouchableOpacity 
+                      style={styles.actionIconBtn}
+                      onPress={() => {
+                        setSelectedStaff(staff);
+                        setStaffDetailModalVisible(true);
+                      }}
+                    >
                       <Ionicons name="calendar-outline" size={16} color="#2563EB" />
                     </TouchableOpacity>
                     <TouchableOpacity 
@@ -1502,8 +1550,8 @@ export default function SettingsScreen() {
                     )}
                   </View>
 
-                  <Text style={styles.fieldLabel}>Phone Number *</Text>
-                  <TextInput style={styles.input} placeholder="Enter phone number" placeholderTextColor="#9CA3AF" selectionColor="#0EA5E9" value={newStaffPhone} onChangeText={setNewStaffPhone} keyboardType="phone-pad" onFocus={() => {
+                  <Text style={styles.fieldLabel}>Phone Number * (10 digits)</Text>
+                  <TextInput style={styles.input} placeholder="Enter 10-digit phone number" placeholderTextColor="#9CA3AF" selectionColor="#0EA5E9" value={newStaffPhone} onChangeText={(text) => { const d = text.replace(/\D/g, ''); setNewStaffPhone(d.slice(0, 10)); }} keyboardType="phone-pad" maxLength={10} onFocus={() => {
                     setTimeout(() => addStaffScrollRef.current?.scrollToEnd({ animated: true }), 120);
                   }} />
 
@@ -1522,6 +1570,7 @@ export default function SettingsScreen() {
                       if (!newStaffName.trim()) { Alert.alert('Error', 'Name is required.'); return; }
                       if (!newStaffRole) { Alert.alert('Error', 'Role is required.'); return; }
                       if (!newStaffPhone.trim()) { Alert.alert('Error', 'Phone number is required.'); return; }
+                      if (newStaffPhone.replace(/\D/g, '').length !== 10) { Alert.alert('Error', 'Phone number must be exactly 10 digits.'); return; }
                       try {
                         setSaving(true);
                         // Map display shift to backend value (strip time info)
@@ -1558,35 +1607,63 @@ export default function SettingsScreen() {
 
 
 
-      {/* Edit Complex Details Modal - KeyboardAvoidingView but no auto-scroll */}
-      <Modal visible={editComplexModalVisible} animationType="slide" transparent presentationStyle="overFullScreen" onRequestClose={() => setEditComplexModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }} keyboardVerticalOffset={0}>
-          <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-            <View style={[styles.editComplexOverlay, { justifyContent: 'flex-end' }]}>
-              <View style={[styles.editComplexBox, { marginBottom: 48 }]}>
-                <View style={[styles.editComplexHeader, { backgroundColor: '#16A34A' }]}>
-                  <Text style={styles.editComplexTitle}>Edit Complex Details</Text>
-                  <Pressable onPress={() => setEditComplexModalVisible(false)} style={styles.editComplexCloseBtn}>
-                    <Ionicons name="close" size={24} color="#fff" />
-                  </Pressable>
-                </View>
-                <ScrollView ref={editModalScrollRef} contentContainerStyle={styles.editComplexContent} keyboardShouldPersistTaps="handled">
+      {/* Edit Complex Details Modal - Full screen with KeyboardAvoidingView */}
+      <Modal visible={editComplexModalVisible} animationType="slide" transparent={false} presentationStyle="fullScreen" onRequestClose={() => setEditComplexModalVisible(false)}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: '#F8FAFC' }}>
+          <KeyboardAvoidingView 
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+            style={{ flex: 1, backgroundColor: '#F8FAFC' }} 
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+          >
+            <View style={[styles.editComplexHeader, { backgroundColor: '#16A34A' }]}>
+              <Text style={styles.editComplexTitle}>Edit Complex Details</Text>
+              <Pressable onPress={() => setEditComplexModalVisible(false)} style={styles.editComplexCloseBtn}>
+                <Ionicons name="close" size={24} color="#fff" />
+              </Pressable>
+            </View>
+            <ScrollView 
+              ref={editModalScrollRef} 
+              contentContainerStyle={[styles.editComplexContent, { paddingBottom: keyboardHeight > 0 ? keyboardHeight + 20 : 40 }]} 
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={true}
+            >
             {/* Basic Information */}
             <Text style={styles.editComplexSectionTitle}>Basic Information</Text>
             <View style={styles.editComplexGrid}>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>Complex Name</Text>
-                <TextInput style={styles.editComplexInput} value={complexName} onChangeText={setComplexName} placeholder="Complex Name" placeholderTextColor="#9CA3AF" />
+                <TextInput 
+                  style={styles.editComplexInput} 
+                  value={complexName} 
+                  onChangeText={setComplexName} 
+                  placeholder="Complex Name" 
+                  placeholderTextColor="#9CA3AF" 
+                  onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 50, animated: true }), 150); }}
+                />
               </View>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>Complex Type</Text>
-                <TextInput style={styles.editComplexInput} value={complexType} onChangeText={setComplexType} placeholder="Indoor" placeholderTextColor="#9CA3AF" />
+                <TextInput 
+                  style={styles.editComplexInput} 
+                  value={complexType} 
+                  onChangeText={setComplexType} 
+                  placeholder="Indoor" 
+                  placeholderTextColor="#9CA3AF" 
+                  onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 50, animated: true }), 150); }}
+                />
               </View>
             </View>
             <View style={styles.editComplexGrid}>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>Status</Text>
-                <TextInput style={styles.editComplexInput} value={complexStatus} onChangeText={setComplexStatus} placeholder="Active" placeholderTextColor="#9CA3AF" />
+                <TextInput 
+                  style={styles.editComplexInput} 
+                  value={complexStatus} 
+                  onChangeText={setComplexStatus} 
+                  placeholder="Active" 
+                  placeholderTextColor="#9CA3AF" 
+                  onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 100, animated: true }), 150); }}
+                />
               </View>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>Cover Image</Text>
@@ -1613,16 +1690,40 @@ export default function SettingsScreen() {
             <View style={styles.editComplexGrid}>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>Email Address</Text>
-                <TextInput style={styles.editComplexInput} value={email} onChangeText={setEmail} placeholder="Email" placeholderTextColor="#9CA3AF" keyboardType="email-address" />
+                <TextInput 
+                  style={styles.editComplexInput} 
+                  value={email} 
+                  onChangeText={setEmail} 
+                  placeholder="Email" 
+                  placeholderTextColor="#9CA3AF" 
+                  keyboardType="email-address" 
+                  onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 250, animated: true }), 150); }}
+                />
               </View>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>Contact Number</Text>
-                <TextInput style={styles.editComplexInput} value={contactNumber} onChangeText={setContactNumber} placeholder="Contact Number" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+                <TextInput 
+                  style={styles.editComplexInput} 
+                  value={contactNumber} 
+                  onChangeText={(text) => { const d = text.replace(/\D/g, ''); setContactNumber(d.slice(0, 10)); }} 
+                  placeholder="Enter 10-digit phone number" 
+                  placeholderTextColor="#9CA3AF" 
+                  keyboardType="phone-pad" 
+                  maxLength={10} 
+                  onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 250, animated: true }), 150); }}
+                />
               </View>
             </View>
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.editComplexLabel}>Website</Text>
-              <TextInput style={styles.editComplexInput} value={website} onChangeText={setWebsite} placeholder="Website" placeholderTextColor="#9CA3AF" />
+              <TextInput 
+                style={styles.editComplexInput} 
+                value={website} 
+                onChangeText={setWebsite} 
+                placeholder="Website" 
+                placeholderTextColor="#9CA3AF" 
+                onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 320, animated: true }), 150); }}
+              />
             </View>
 
             {/* Address */}
@@ -1630,20 +1731,49 @@ export default function SettingsScreen() {
             <View style={styles.editComplexGrid}>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>County</Text>
-                <TextInput style={styles.editComplexInput} value={county} onChangeText={setCounty} placeholder="County" placeholderTextColor="#9CA3AF" />
+                <TextInput 
+                  style={styles.editComplexInput} 
+                  value={county} 
+                  onChangeText={setCounty} 
+                  placeholder="County" 
+                  placeholderTextColor="#9CA3AF" 
+                  onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 400, animated: true }), 150); }}
+                />
               </View>
               <View style={styles.editComplexCol}>
                 <Text style={styles.editComplexLabel}>Location</Text>
-                <TextInput style={styles.editComplexInput} value={location} onChangeText={setLocation} placeholder="Location" placeholderTextColor="#9CA3AF" />
+                <TextInput 
+                  style={styles.editComplexInput} 
+                  value={location} 
+                  onChangeText={setLocation} 
+                  placeholder="Location" 
+                  placeholderTextColor="#9CA3AF" 
+                  onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 400, animated: true }), 150); }}
+                />
               </View>
             </View>
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.editComplexLabel}>Full Address</Text>
-              <TextInput style={[styles.editComplexInput, { minHeight: 80, textAlignVertical: 'top' }]} value={fullAddress} onChangeText={setFullAddress} placeholder="Full Address" placeholderTextColor="#9CA3AF" multiline />
+              <TextInput 
+                style={[styles.editComplexInput, { minHeight: 80, textAlignVertical: 'top' }]} 
+                value={fullAddress} 
+                onChangeText={setFullAddress} 
+                placeholder="Full Address" 
+                placeholderTextColor="#9CA3AF" 
+                multiline 
+                onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 480, animated: true }), 150); }}
+              />
             </View>
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.editComplexLabel}>Postal Code</Text>
-              <TextInput style={styles.editComplexInput} value={postalCode} onChangeText={setPostalCode} placeholder="Postal Code" placeholderTextColor="#9CA3AF" />
+              <TextInput 
+                style={styles.editComplexInput} 
+                value={postalCode} 
+                onChangeText={setPostalCode} 
+                placeholder="Postal Code" 
+                placeholderTextColor="#9CA3AF" 
+                onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 580, animated: true }), 150); }}
+              />
             </View>
 
             {/* Amenities */}
@@ -1662,6 +1792,7 @@ export default function SettingsScreen() {
                   placeholderTextColor="#9CA3AF"
                   value={newAmenity}
                   onChangeText={setNewAmenity}
+                  onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 650, animated: true }), 150); }}
                 />
                 <TouchableOpacity
                   style={styles.editComplexAddAmenityBtn}
@@ -1681,7 +1812,14 @@ export default function SettingsScreen() {
             <Text style={[styles.editComplexSectionTitle, { marginTop: 20 }]}>Media</Text>
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.editComplexLabel}>Video Tour URL</Text>
-              <TextInput style={styles.editComplexInput} value={videoTourUrl} onChangeText={setVideoTourUrl} placeholder="Video Tour URL" placeholderTextColor="#9CA3AF" />
+              <TextInput 
+                style={styles.editComplexInput} 
+                value={videoTourUrl} 
+                onChangeText={setVideoTourUrl} 
+                placeholder="Video Tour URL" 
+                placeholderTextColor="#9CA3AF" 
+                onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 750, animated: true }), 150); }}
+              />
             </View>
             <View style={styles.editComplexGalleryBox}>
               <Text style={styles.editComplexLabel}>Gallery Images (Select up to 4 at a time)</Text>
@@ -1710,18 +1848,44 @@ export default function SettingsScreen() {
             <Text style={[styles.editComplexSectionTitle, { marginTop: 20 }]}>Additional Details</Text>
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.editComplexLabel}>Description</Text>
-              <TextInput style={[styles.editComplexInput, { minHeight: 100, textAlignVertical: 'top' }]} value={description} onChangeText={setDescription} placeholder="Description" placeholderTextColor="#9CA3AF" multiline />
+              <TextInput 
+                style={[styles.editComplexInput, { minHeight: 100, textAlignVertical: 'top' }]} 
+                value={description} 
+                onChangeText={setDescription} 
+                placeholder="Description" 
+                placeholderTextColor="#9CA3AF" 
+                multiline 
+                onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 950, animated: true }), 150); }}
+              />
             </View>
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.editComplexLabel}>Terms & Conditions</Text>
-              <TextInput style={[styles.editComplexInput, { minHeight: 100, textAlignVertical: 'top' }]} value={termsConditions} onChangeText={setTermsConditions} placeholder="Terms & Conditions" placeholderTextColor="#9CA3AF" multiline />
+              <TextInput 
+                style={[styles.editComplexInput, { minHeight: 100, textAlignVertical: 'top' }]} 
+                value={termsConditions} 
+                onChangeText={setTermsConditions} 
+                placeholder="Terms & Conditions" 
+                placeholderTextColor="#9CA3AF" 
+                multiline 
+                onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollTo({ y: 1100, animated: true }), 150); }}
+              />
             </View>
 
             {/* Social Links */}
             <Text style={[styles.editComplexSectionTitle, { marginTop: 20 }]}>Social Links</Text>
             <View style={styles.editComplexSocialRow}>
-              <TextInput style={styles.editComplexSocialSelect} placeholder="Select Platform" placeholderTextColor="#9CA3AF" />
-              <TextInput style={styles.editComplexSocialInput} placeholder="https://..." placeholderTextColor="#9CA3AF" />
+              <TextInput 
+                style={styles.editComplexSocialSelect} 
+                placeholder="Select Platform" 
+                placeholderTextColor="#9CA3AF" 
+                onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollToEnd({ animated: true }), 150); }}
+              />
+              <TextInput 
+                style={styles.editComplexSocialInput} 
+                placeholder="https://..." 
+                placeholderTextColor="#9CA3AF" 
+                onFocus={(e) => { setTimeout(() => editModalScrollRef.current?.scrollToEnd({ animated: true }), 150); }}
+              />
               <TouchableOpacity style={styles.editComplexAddSocialBtn}>
                 <Text style={styles.editComplexAddSocialText}>Add</Text>
               </TouchableOpacity>
@@ -1743,11 +1907,9 @@ export default function SettingsScreen() {
                 )}
               </TouchableOpacity>
             </View>
-                </ScrollView>
-              </View>
-            </View>
-          </TouchableWithoutFeedback>
-        </KeyboardAvoidingView>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </SafeAreaView>
       </Modal>
 
       {/* Staff Detail Modal */}
@@ -1846,7 +2008,7 @@ export default function SettingsScreen() {
                       {/* Phone Input */}
                       <View style={{ marginBottom: 14 }}>
                         <Text style={{ fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 6 }}>Phone</Text>
-                        <TextInput style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, fontSize: 13, color: '#111827' }} value={editedStaffPhone} onChangeText={setEditedStaffPhone} placeholder="Phone number" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" />
+                        <TextInput style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, fontSize: 13, color: '#111827' }} value={editedStaffPhone} onChangeText={(text) => { const d = text.replace(/\D/g, ''); setEditedStaffPhone(d.slice(0, 10)); }} placeholder="Enter 10-digit phone number" placeholderTextColor="#9CA3AF" keyboardType="phone-pad" maxLength={10} />
                       </View>
 
                       {/* Status Dropdown */}
@@ -2675,10 +2837,10 @@ const styles = StyleSheet.create({
   /* Edit Complex Details Modal Styles */
   editComplexOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 12 },
   editComplexBox: { width: '94%', maxHeight: '88%', backgroundColor: '#fff', borderRadius: 12, overflow: 'hidden' },
-  editComplexHeader: { paddingHorizontal: 16, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  editComplexHeader: { paddingHorizontal: 16, paddingVertical: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   editComplexTitle: { fontSize: 18, fontWeight: '700', color: '#fff' },
   editComplexCloseBtn: { padding: 8 },
-  editComplexContent: { paddingHorizontal: 16, paddingVertical: 16, paddingBottom: 32 },
+  editComplexContent: { paddingHorizontal: 16, paddingVertical: 20, backgroundColor: '#F8FAFC' },
   editComplexSectionTitle: { fontSize: 15, fontWeight: '700', color: '#111827', marginBottom: 12 },
   editComplexGrid: { flexDirection: 'row', gap: 12, marginBottom: 16 },
   editComplexCol: { flex: 1 },

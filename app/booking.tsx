@@ -5,8 +5,10 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
-import { getSports, getSlotAvailability, createManualBooking, getVenue, cancelBooking } from '@/services/indoorAdminApi';
-import { Sport, SlotAvailabilityResponse, CourtSlots, SlotInfo, Venue } from '@/types/api';
+import { getSports, getSlotAvailability, createManualBooking, getVenue, cancelBooking, getUnreadNotificationCount, getAdminNotifications, cancelAllPermanentBookings, updateBookingPaymentStatus } from '@/services/indoorAdminApi';
+import { notificationEvents, notificationPayloadEvents } from '@/hooks/useNotificationCount';
+import NotificationBanner from '@/components/NotificationBanner';
+import { Sport, SlotAvailabilityResponse, CourtSlots, SlotInfo, Venue, AdminCreateBookingPayload } from '@/types/api';
 
 // Helper function to get sport icon for booking screen
 const getSportIconForBooking = (sportName: string): 'football' | 'water' | 'radio-button-on' | 'basketball' | 'tennisball' | 'fitness' => {
@@ -130,32 +132,6 @@ export default function BookingScreen() {
     })();
   }, []);
 
-  // Fetch venue data when screen is focused (to get fresh opening hours)
-  useFocusEffect(
-    useCallback(() => {
-      (async () => {
-        try {
-          const venueData = await getVenue().catch(() => null);
-          setVenue(venueData);
-          console.log('[Booking] ===== VENUE DATA FETCHED =====');
-          console.log('[Booking] Full venue.opening_hours:', JSON.stringify(venueData?.opening_hours, null, 2));
-          console.log('[Booking] Monday config:', JSON.stringify(venueData?.opening_hours?.monday, null, 2));
-          console.log('[Booking] Saturday config:', JSON.stringify(venueData?.opening_hours?.saturday, null, 2));
-        } catch (err) {
-          console.error('Failed to fetch venue:', err);
-        }
-      })();
-    }, [])
-  );
-
-  // Re-fetch slots when screen comes back to focus (after settings changes)
-  useFocusEffect(
-    useCallback(() => {
-      console.log('[Booking] Screen focused, refreshing slots...');
-      fetchSlots(true);
-    }, [fetchSlots])
-  );
-
   // Fetch slot availability when sport or date changes
   const fetchSlots = useCallback(async (showRefresh = false) => {
     console.log('[Booking] fetchSlots called:', { selectedSport, selectedDate: selectedDate.toISOString(), showRefresh });
@@ -196,6 +172,32 @@ export default function BookingScreen() {
       setRefreshing(false);
     }
   }, [selectedSport, selectedDate]);
+
+  // Fetch venue data when screen is focused (to get fresh opening hours)
+  useFocusEffect(
+    useCallback(() => {
+      (async () => {
+        try {
+          const venueData = await getVenue().catch(() => null);
+          setVenue(venueData);
+          console.log('[Booking] ===== VENUE DATA FETCHED =====');
+          console.log('[Booking] Full venue.opening_hours:', JSON.stringify(venueData?.opening_hours, null, 2));
+          console.log('[Booking] Monday config:', JSON.stringify(venueData?.opening_hours?.monday, null, 2));
+          console.log('[Booking] Saturday config:', JSON.stringify(venueData?.opening_hours?.saturday, null, 2));
+        } catch (err) {
+          console.error('Failed to fetch venue:', err);
+        }
+      })();
+    }, [])
+  );
+
+  // Re-fetch slots when screen comes back to focus (after settings changes)
+  useFocusEffect(
+    useCallback(() => {
+      console.log('[Booking] Screen focused, refreshing slots...');
+      fetchSlots(true);
+    }, [fetchSlots])
+  );
 
   useEffect(() => {
     fetchSlots();
@@ -382,11 +384,14 @@ export default function BookingScreen() {
   const [playerPhone, setPlayerPhone] = useState('');
   const [bookingStatus, setBookingStatus] = useState('Pending');
   const [permanentBooking, setPermanentBooking] = useState(false);
+  const [permanentWeeks, setPermanentWeeks] = useState(4);
   const [isPaid, setIsPaid] = useState(false);
   const [notes, setNotes] = useState('');
   // Booked details modal state
   const [bookedDetailsVisible, setBoostedDetailsVisible] = useState(false);
   const [selectedBookedSlot, setSelectedBookedSlot] = useState<SlotInfo | null>(null);
+  const [cancelingAll, setCancelingAll] = useState(false);
+  const [markingAsPaid, setMarkingAsPaid] = useState(false);
   const scrollRef = useRef<ScrollView | null>(null);
   const [calendarModalVisible, setCalendarModalVisible] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -456,7 +461,7 @@ export default function BookingScreen() {
         endTime = `${((h + 1) % 24).toString().padStart(2, '0')}:00`;
       }
 
-      const payload = {
+      const payload: AdminCreateBookingPayload = {
         sport_id: sportId,
         booking_date: dateStr,
         customer_name: playerName.trim(),
@@ -471,6 +476,8 @@ export default function BookingScreen() {
         }],
         notes: notes.trim() || '',
         skip_hold: true,
+        is_permanent: permanentBooking,
+        ...(permanentBooking && { permanent_weeks: permanentWeeks }),
       };
 
       console.log('=== BOOKING PAYLOAD ===');
@@ -479,6 +486,7 @@ export default function BookingScreen() {
       console.log('Customer:', playerName, playerPhone);
       console.log('Slot:', selectedSlot.start_time, '-', endTime);
       console.log('Price:', price);
+      console.log('Permanent:', permanentBooking, permanentBooking ? `(${permanentWeeks} weeks)` : '');
       console.log('Full Payload:', JSON.stringify(payload, null, 2));
       console.log('Endpoint: POST api/indoor-admin/bookings/create/');
 
@@ -489,9 +497,25 @@ export default function BookingScreen() {
       setPlayerPhone('');
       setNotes('');
       setIsPaid(false);
-      Alert.alert('Success', 'Booking created successfully!');
+      setPermanentBooking(false);
+      setPermanentWeeks(4);
+      
+      const successMsg = permanentBooking 
+        ? `Permanent booking created for ${permanentWeeks} weeks!` 
+        : 'Booking created successfully!';
+      Alert.alert('Success', successMsg);
       // Refresh slots to show the new booking
       fetchSlots();
+      // Immediately refresh notification badge count
+      try {
+        const unread = await getUnreadNotificationCount();
+        notificationEvents.setCount(unread);
+      } catch { /* ignore */ }
+      // Refresh notification count immediately
+      try {
+        const unread = await getUnreadNotificationCount();
+        notificationEvents.setCount(unread);
+      } catch { /* ignore */ }
     } catch (err: any) {
       console.error('=== BOOKING ERROR ===');
       console.error('Full Error:', err);
@@ -530,10 +554,13 @@ export default function BookingScreen() {
 
     const bookingId = selectedBookedSlot.booking.id;
     const customerName = selectedBookedSlot.booking.customer_name || 'Booking';
+    const isPermanent = selectedBookedSlot.booking?.is_permanent;
 
     Alert.alert(
       'Cancel Booking',
-      `Are you sure you want to cancel the booking for ${customerName}?`,
+      isPermanent
+        ? `This is a permanent (weekly) booking. Do you want to cancel just this one booking for ${customerName}?`
+        : `Are you sure you want to cancel the booking for ${customerName}?`,
       [
         { text: 'No', onPress: () => {}, style: 'cancel' },
         {
@@ -547,6 +574,47 @@ export default function BookingScreen() {
               Alert.alert('Success', 'Booking cancelled successfully!');
               // Refresh slots to update the booking list
               fetchSlots();
+              // Immediately refresh notification badge count
+              try {
+                const unread = await getUnreadNotificationCount();
+                notificationEvents.setCount(unread);
+              } catch { /* ignore */ }
+              // Try to fetch server notification and emit payload; fallback to local payload
+              try {
+                const res = await getAdminNotifications(1, 1);
+                const latest = res && res.results && res.results[0];
+                if (latest) {
+                  console.log('[Booking] Emitting server notification for banner:', latest);
+                  notificationPayloadEvents.show(latest);
+                } else {
+                  // server hasn't created notification yet — emit local fallback
+                  const bk = selectedBookedSlot?.booking;
+                  if (bk) {
+                    const localPayload = {
+                      title: 'Booking Cancelled ❌',
+                      message: `${bk.customer_name || 'Booking'} – ${bk.game_name || ''} on ${bk.booking_date || ''} at ${bk.start_time || ''} has been cancelled.`,
+                      data: { booking_id: bk.id }
+                    };
+                    console.log('[Booking] Emitting local cancellation payload for banner:', localPayload);
+                    notificationPayloadEvents.show(localPayload);
+                  } else {
+                    console.log('[Booking] No booking data available to build local cancellation payload');
+                  }
+                }
+              } catch (e) {
+                console.log('[Booking] Error fetching admin notifications for banner:', e);
+                // on error, emit local fallback
+                const bk = selectedBookedSlot?.booking;
+                if (bk) {
+                  const localPayload = {
+                    title: 'Booking Cancelled ❌',
+                    message: `${bk.customer_name || 'Booking'} – ${bk.game_name || ''} on ${bk.booking_date || ''} at ${bk.start_time || ''} has been cancelled.`,
+                    data: { booking_id: bk.id }
+                  };
+                  console.log('[Booking] Emitting local cancellation payload for banner (after error):', localPayload);
+                  notificationPayloadEvents.show(localPayload);
+                }
+              }
             } catch (err: any) {
               console.error('=== CANCEL BOOKING ERROR ===');
               console.error('Full Error:', err);
@@ -572,8 +640,107 @@ export default function BookingScreen() {
     );
   };
 
+  const handleCancelAllPermanentBookings = async () => {
+    const permanentSourceId = selectedBookedSlot?.booking?.permanent_source_id;
+    if (!permanentSourceId) {
+      Alert.alert('Error', 'Cannot find permanent booking group.');
+      return;
+    }
+
+    const customerName = selectedBookedSlot?.booking?.customer_name || 'Booking';
+
+    Alert.alert(
+      'Cancel ALL Weekly Bookings',
+      `Are you sure you want to cancel ALL remaining weekly bookings for ${customerName}? This cannot be undone.`,
+      [
+        { text: 'No', onPress: () => {}, style: 'cancel' },
+        {
+          text: 'Yes, Cancel All',
+          onPress: async () => {
+            try {
+              setCancelingAll(true);
+              const result = await cancelAllPermanentBookings(permanentSourceId);
+              setBoostedDetailsVisible(false);
+              setSelectedBookedSlot(null);
+              Alert.alert(
+                'Success', 
+                result.message || `All permanent bookings cancelled successfully!`
+              );
+              fetchSlots();
+              try {
+                const unread = await getUnreadNotificationCount();
+                notificationEvents.setCount(unread);
+              } catch { /* ignore */ }
+            } catch (err: any) {
+              console.error('=== CANCEL ALL PERMANENT ERROR ===', err);
+              let errorMsg = 'Failed to cancel permanent bookings.';
+              if (err?.response?.data?.detail) {
+                errorMsg = err.response.data.detail;
+              } else if (err?.message) {
+                errorMsg = err.message;
+              }
+              Alert.alert('Cancellation Error', errorMsg);
+            } finally {
+              setCancelingAll(false);
+            }
+          },
+          style: 'destructive',
+        },
+      ]
+    );
+  };
+
+  const handleMarkAsPaid = async () => {
+    if (!selectedBookedSlot?.booking?.id) {
+      Alert.alert('Error', 'Cannot update: Booking ID not found.');
+      return;
+    }
+
+    const bookingId = selectedBookedSlot.booking.id;
+    const customerName = selectedBookedSlot.booking.customer_name || 'Booking';
+
+    Alert.alert(
+      'Mark as Paid',
+      `Mark the booking for ${customerName} as Paid?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Yes, Mark Paid',
+          onPress: async () => {
+            try {
+              setMarkingAsPaid(true);
+              await updateBookingPaymentStatus(bookingId, { payment_status: 'Paid' });
+              // Update the local selected slot to reflect the change immediately
+              setSelectedBookedSlot((prev) => {
+                if (!prev || !prev.booking) return prev;
+                return {
+                  ...prev,
+                  booking: { ...prev.booking, payment_status: 'Paid' },
+                };
+              });
+              Alert.alert('Success', 'Payment status updated to Paid!');
+              fetchSlots();
+            } catch (err: any) {
+              console.error('=== MARK AS PAID ERROR ===', err);
+              let errorMsg = 'Failed to update payment status.';
+              if (err?.response?.data?.detail) {
+                errorMsg = err.response.data.detail;
+              } else if (err?.message) {
+                errorMsg = err.message;
+              }
+              Alert.alert('Error', errorMsg);
+            } finally {
+              setMarkingAsPaid(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
+      <NotificationBanner />
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
@@ -766,9 +933,9 @@ export default function BookingScreen() {
                     )}
 
                     {effectiveStatus === 'booked' && (
-                      <TouchableOpacity style={[styles.slot, styles.slotBooked, isBookedPast && { opacity: 0.6 }]} onPress={() => handleBookedSlotPress(slot)}>
+                      <TouchableOpacity style={[styles.slot, styles.slotBooked, isBookedPast && { opacity: 0.6 }, slot.booking?.is_permanent && styles.slotPermanent]} onPress={() => handleBookedSlotPress(slot)}>
                         <View style={styles.bookedAvatar}>
-                          <Ionicons name="person" size={16} color="#fff" />
+                          <Ionicons name={slot.booking?.is_permanent ? "repeat" : "person"} size={16} color="#fff" />
                         </View>
                         <View style={styles.bookedInfoCompact}>
                           <ThemedText style={styles.bookedName} numberOfLines={1} ellipsizeMode="tail">{slot.booking?.customer_name || 'Booked'}</ThemedText>
@@ -776,7 +943,21 @@ export default function BookingScreen() {
                             <ThemedText style={styles.bookedPhone} numberOfLines={1} ellipsizeMode="tail">{slot.booking.customer_phone}</ThemedText>
                           ) : null}
                         </View>
-                        <ThemedText style={styles.bookedLabel}>{isBookedPast ? 'Completed' : 'Booked'}</ThemedText>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <ThemedText style={styles.bookedLabel}>{isBookedPast ? 'Completed' : 'Booked'}</ThemedText>
+                          <View style={{ flexDirection: 'row', gap: 4, marginTop: 2 }}>
+                            {slot.booking?.payment_status && (
+                              <View style={[styles.paymentBadge, slot.booking.payment_status === 'Paid' ? styles.paymentBadgePaid : styles.paymentBadgeUnpaid]}>
+                                <ThemedText style={styles.paymentBadgeText}>
+                                  {slot.booking.payment_status === 'Paid' ? 'Paid' : 'Unpaid'}
+                                </ThemedText>
+                              </View>
+                            )}
+                            {slot.booking?.is_permanent && (
+                              <ThemedText style={styles.permanentBadge}>Weekly</ThemedText>
+                            )}
+                          </View>
+                        </View>
                       </TouchableOpacity>
                     )}
                   </View>
@@ -870,6 +1051,42 @@ export default function BookingScreen() {
                   </View>
                 </View>
 
+                {/* Permanent Booking Weeks Selector */}
+                {permanentBooking && (
+                  <View style={styles.permanentWeeksContainer}>
+                    <View style={styles.permanentWeeksInfo}>
+                      <Ionicons name="repeat" size={20} color="#15803D" />
+                      <Text style={styles.permanentWeeksLabel}>
+                        Book every {['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][selectedDate.getDay()]} for:
+                      </Text>
+                    </View>
+                    <View style={styles.weeksButtonGroup}>
+                      {[2, 4, 8, 12].map((w) => (
+                        <TouchableOpacity
+                          key={w}
+                          style={[
+                            styles.weeksButton,
+                            permanentWeeks === w && styles.weeksButtonActive,
+                          ]}
+                          onPress={() => setPermanentWeeks(w)}
+                        >
+                          <Text
+                            style={[
+                              styles.weeksButtonText,
+                              permanentWeeks === w && styles.weeksButtonTextActive,
+                            ]}
+                          >
+                            {w}w
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                    <Text style={styles.permanentWeeksHint}>
+                      {permanentWeeks} bookings will be created ({permanentWeeks} weeks)
+                    </Text>
+                  </View>
+                )}
+
                 <View style={styles.rowBetween}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.fieldLabel}>Payment Status</Text>
@@ -934,6 +1151,19 @@ export default function BookingScreen() {
               <ScrollView contentContainerStyle={styles.detailsContent}>
                 {selectedBookedSlot && (
                   <>
+                    {/* Permanent Booking Banner */}
+                    {selectedBookedSlot.booking?.is_permanent && (
+                      <View style={styles.permanentBannerContainer}>
+                        <Ionicons name="repeat" size={20} color="#15803D" />
+                        <View style={{ flex: 1, marginLeft: 10 }}>
+                          <Text style={styles.permanentBannerTitle}>Permanent (Weekly) Booking</Text>
+                          <Text style={styles.permanentBannerSubtext}>
+                            This booking repeats every week on the same day
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
                     {/* Customer Info */}
                     <View style={styles.detailsSection}>
                       <ThemedText style={styles.sectionTitle}>Customer Information</ThemedText>
@@ -1021,6 +1251,31 @@ export default function BookingScreen() {
                           </View>
                         )}
                       </View>
+                      {selectedBookedSlot.booking?.payment_status !== 'Paid' && (
+                        <TouchableOpacity
+                          style={[{
+                            marginTop: 10,
+                            backgroundColor: '#10B981',
+                            paddingVertical: 12,
+                            borderRadius: 10,
+                            alignItems: 'center',
+                            flexDirection: 'row',
+                            justifyContent: 'center',
+                            gap: 8,
+                          }, markingAsPaid && { opacity: 0.5 }]}
+                          onPress={handleMarkAsPaid}
+                          disabled={markingAsPaid}
+                        >
+                          {markingAsPaid ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                          ) : (
+                            <>
+                              <Ionicons name="checkmark-circle" size={20} color="#fff" />
+                              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>Mark as Paid</Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      )}
                     </View>
 
                     {/* Notes Section - Only show if notes exist */}
@@ -1043,10 +1298,28 @@ export default function BookingScreen() {
                 <TouchableOpacity 
                   style={[styles.detailsCancelBtn, canceling && { opacity: 0.5 }]} 
                   onPress={handleCancelBooking}
-                  disabled={canceling}
+                  disabled={canceling || cancelingAll}
                 >
-                  {canceling ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.detailsCancelText}>Cancel Booking</Text>}
+                  {canceling ? <ActivityIndicator size="small" color="#fff" /> : (
+                    <Text style={styles.detailsCancelText}>
+                      {selectedBookedSlot?.booking?.is_permanent ? 'Cancel This Booking' : 'Cancel Booking'}
+                    </Text>
+                  )}
                 </TouchableOpacity>
+                {selectedBookedSlot?.booking?.is_permanent && selectedBookedSlot?.booking?.permanent_source_id && (
+                  <TouchableOpacity 
+                    style={[styles.detailsCancelAllBtn, cancelingAll && { opacity: 0.5 }]} 
+                    onPress={handleCancelAllPermanentBookings}
+                    disabled={canceling || cancelingAll}
+                  >
+                    {cancelingAll ? <ActivityIndicator size="small" color="#fff" /> : (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                        <Ionicons name="repeat" size={16} color="#fff" />
+                        <Text style={styles.detailsCancelAllText}>Cancel All Weekly Bookings</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity style={styles.detailsCloseButtonFull} onPress={() => setBoostedDetailsVisible(false)}>
                   <Text style={styles.detailsCloseButtonText}>Close</Text>
                 </TouchableOpacity>
@@ -1478,4 +1751,129 @@ const styles = StyleSheet.create({
   paymentStatusText: {
     fontSize: 14,
     fontWeight: '600',
-  },});
+  },
+  // Permanent Booking Styles
+  permanentWeeksContainer: {
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+    borderRadius: 10,
+    padding: 12,
+    marginTop: 8,
+  },
+  permanentWeeksInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  permanentWeeksLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#15803D',
+    flex: 1,
+  },
+  weeksButtonGroup: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 8,
+  },
+  weeksButton: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#E5E7EB',
+    alignItems: 'center',
+  },
+  weeksButtonActive: {
+    backgroundColor: '#15803D',
+  },
+  weeksButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#374151',
+  },
+  weeksButtonTextActive: {
+    color: '#fff',
+  },
+  permanentWeeksHint: {
+    fontSize: 11,
+    color: '#6B7280',
+    textAlign: 'center',
+  },
+  slotPermanent: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#3B82F6',
+    borderWidth: 1.5,
+  },
+  permanentBadge: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#3B82F6',
+    backgroundColor: '#DBEAFE',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginTop: 2,
+    overflow: 'hidden',
+  },
+  paymentBadge: {
+    fontSize: 6,
+    fontWeight: '700',
+    paddingHorizontal: 4,
+    paddingVertical: 0,
+    borderRadius: 3,
+    overflow: 'hidden',
+    height: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 14,
+  },
+  paymentBadgePaid: {
+    color: '#FFFFFF',
+    backgroundColor: '#10B981',
+  },
+  paymentBadgeUnpaid: {
+    color: '#FFFFFF',
+    backgroundColor: '#EF4444',
+  },
+  paymentBadgeText: {
+    fontSize: 6,
+    color: '#FFFFFF',
+    fontWeight: '700',
+    lineHeight: 14,
+    textAlign: 'center',
+  },
+  permanentBannerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 16,
+  },
+  permanentBannerTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#15803D',
+  },
+  permanentBannerSubtext: {
+    fontSize: 11,
+    color: '#6B7280',
+    marginTop: 2,
+  },
+  detailsCancelAllBtn: {
+    backgroundColor: '#B91C1C',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  detailsCancelAllText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+});
